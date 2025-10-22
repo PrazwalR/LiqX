@@ -1,0 +1,61 @@
+type User @entity(immutable: false) {
+  id: ID!
+  positions: [Position!]! @derivedFrom(field: "user")
+  totalSupplied: BigDecimal!
+  totalBorrowed: BigDecimal!
+  liquidationCount: Int!
+  lastUpdated: BigInt!
+}
+
+type Position @entity(immutable: false) {
+  id: ID!
+  user: User!
+  collateralAsset: String!
+  collateralAmount: BigDecimal!
+  debtAsset: String!
+  debtAmount: BigDecimal!
+  healthFactor: BigDecimal!
+  isActive: Boolean!
+  createdAt: BigInt!
+  updatedAt: BigInt!
+  liquidations: [Liquidation!]! @derivedFrom(field: "position")
+}
+
+type Supply @entity(immutable: true) {
+  id: ID!
+  user: User!
+  asset: String!
+  amount: BigDecimal!
+  timestamp: BigInt!
+  txHash: String!
+}
+
+type Borrow @entity(immutable: true) {
+  id: ID!
+  user: User!
+  asset: String!
+  amount: BigDecimal!
+  interestRateMode: Int!
+  timestamp: BigInt!
+  txHash: String!
+}
+
+type Liquidation @entity(immutable: true) {
+  id: ID!
+  position: Position!
+  collateralAsset: String!
+  debtAsset: String!
+  debtToCover: BigDecimal!
+  liquidatedCollateralAmount: BigDecimal!
+  liquidator: String!
+  timestamp: BigInt!
+  txHash: String!
+}
+
+type Protocol @entity(immutable: false) {
+  id: ID!
+  totalValueLocked: BigDecimal!
+  totalBorrowed: BigDecimal!
+  totalLiquidations: Int!
+  lastUpdated: BigInt!
+}

@@ -55,7 +55,10 @@ MIN_AMOUNT_USD = 1000.0  # Minimum $1000 to move
 GAS_COST_ESTIMATE = 50.0  # Estimated gas cost in USD
 BRIDGE_FEE_ESTIMATE = 15.0  # Estimated bridge fee in USD
 
+# Operation modes
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
+PRESENTATION_MODE = os.getenv('PRESENTATION_MODE', 'false').lower() == 'true'
+PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
 
 
 # ═══════════════════════════════════════════════════════

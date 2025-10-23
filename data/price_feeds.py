@@ -94,8 +94,7 @@ class PriceFeedManager:
 
         Priority:
         1. Demo mode (if enabled) - instant mock prices
-        2. Chainlink oracle (if enabled) - on-chain, production
-        3. CoinGecko API - off-chain, development
+        2. CoinGecko API - perfect for off-chain analysis
 
         Args:
             token_symbol: Token symbol (ETH, WBTC, SOL)
@@ -119,20 +118,11 @@ class PriceFeedManager:
                     f"[CACHE] {token_symbol} price: ${cached_price:.2f}")
                 return cached_price
 
-        # Try Chainlink first (production)
-        if self.use_chainlink:
-            price = await self._fetch_from_chainlink(token_symbol)
-            if price:
-                self.price_cache[cache_key] = (
-                    price, asyncio.get_event_loop().time())
-                return price
-
-        # Fallback to CoinGecko (development)
+        # Fetch from CoinGecko - perfect for our use case!
         price = await self._fetch_from_coingecko(token_symbol)
         if price:
             self.price_cache[cache_key] = (
                 price, asyncio.get_event_loop().time())
-            logger.info(f"[CoinGecko] {token_symbol} price: ${price:.2f}")
             return price
 
         logger.warning(f"Failed to fetch price for {token_symbol}")
@@ -155,70 +145,23 @@ class PriceFeedManager:
 
     async def _fetch_from_coingecko(self, symbol: str) -> Optional[float]:
         """
-        Fetch price from CoinGecko API (off-chain, centralized)
-
-        Good for development but has delays (5-15 min) and rate limits
-
-        Args:
-            symbol: Token symbol (e.g., 'ETH', 'WBTC')
-
-        Returns:
-            Price in USD or None if failed
-        """
-        """
-        Fetch price from Chainlink Price Feed (on-chain oracle)
-        
-        This is the PRODUCTION method - most reliable and decentralized
-        
-        Args:
-            symbol: Token symbol (e.g., 'ETH', 'WBTC')
-        
-        Returns:
-            Price in USD or None if failed
-        """
-        if not self.use_chainlink:
-            return None
-
-        # Get price feed address
-        feed_address = CHAINLINK_PRICE_FEEDS.get(symbol.upper())
-        if not feed_address:
-            logger.debug(f"No Chainlink feed for {symbol}")
-            return None
-
-        try:
-            # Initialize Web3 if needed
-            self._init_web3()
-            if not self.web3 or not self.web3.is_connected():
-                return None
-
-            # Create contract instance
-            contract = self.web3.eth.contract(
-                address=self.web3.to_checksum_address(feed_address),
-                abi=CHAINLINK_ABI
-            )
-
-            # Call latestRoundData()
-            round_data = contract.functions.latestRoundData().call()
-            price_raw = round_data[1]  # answer field
-
-            # Get decimals
-            decimals = contract.functions.decimals().call()
-
-            # Convert to float with proper decimals
-            price = float(price_raw) / (10 ** decimals)
-
-            logger.info(f"🔗 Chainlink: {symbol} = ${price:,.2f}")
-            return price
-
-        except Exception as e:
-            logger.warning(f"Chainlink fetch failed for {symbol}: {e}")
-            return None
-
-        """
         Fetch price from CoinGecko API
-        
+
+        Perfect for our use case:
+        - Off-chain analysis (don't need on-chain oracle)
+        - Wide token coverage
+        - Simple REST API
+        - Real-time enough for liquidation monitoring
+
         API Docs: https://www.coingecko.com/en/api/documentation
+
+        Args:
+            symbol: Token symbol (e.g., 'ETH', 'WBTC', 'USDC')
+
+        Returns:
+            Price in USD or None if failed
         """
+        # Map token symbols to CoinGecko IDs
         token_id_map = {
             "ETH": "ethereum",
             "WETH": "ethereum",
@@ -230,9 +173,9 @@ class PriceFeedManager:
             "PYUSD": "paypal-usd"
         }
 
-        token_id = token_id_map.get(token_symbol.upper())
+        token_id = token_id_map.get(symbol.upper())
         if not token_id:
-            logger.warning(f"Unknown token symbol: {token_symbol}")
+            logger.warning(f"Unknown token symbol: {symbol}")
             return None
 
         url = "https://api.coingecko.com/api/v3/simple/price"
@@ -257,7 +200,10 @@ class PriceFeedManager:
                     if response.status == 200:
                         data = await response.json()
                         if token_id in data and "usd" in data[token_id]:
-                            return data[token_id]["usd"]
+                            price = data[token_id]["usd"]
+                            logger.info(
+                                f"💰 CoinGecko: {symbol} = ${price:,.2f}")
+                            return price
                     else:
                         logger.error(f"CoinGecko API error: {response.status}")
         except asyncio.TimeoutError:

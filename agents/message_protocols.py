@@ -5,7 +5,7 @@ from typing import List, Optional
 
 class PositionAlert(Model):
     user_address: str
-    position_id: int
+    position_id: str  # Changed to str to support subgraph hash IDs
     protocol: str
     chain: str
     health_factor: float
@@ -86,3 +86,17 @@ class HealthCheckResponse(Model):
     uptime: float
     messages_processed: int
     timestamp: int
+
+
+class PresentationTrigger(Model):
+    """Manual trigger for live presentations - only works in PRESENTATION_MODE"""
+    trigger_id: str
+    trigger_type: str  # "market_crash", "price_drop", "alert_position", "force_rebalance"
+    secret: str  # Must match PRESENTATION_TRIGGER_SECRET in .env
+
+    # Optional parameters
+    # Specific position to trigger alert
+    target_position_id: Optional[str] = None
+    eth_price_drop_percent: Optional[float] = None  # For market_crash
+    custom_price: Optional[float] = None  # For price_drop
+    target_token: Optional[str] = None  # For price_drop

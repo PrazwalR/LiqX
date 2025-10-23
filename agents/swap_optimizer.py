@@ -72,6 +72,12 @@ CHAIN_IDS = {
 
 # Demo mode
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
+PRESENTATION_MODE = os.getenv('PRESENTATION_MODE', 'false').lower() == 'true'
+PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
+
+# Presentation settings
+PRESENTATION_MOCK_FUSION = os.getenv(
+    'PRESENTATION_MOCK_FUSION', 'true').lower() == 'true'
 
 
 # ═══════════════════════════════════════════════════════

@@ -71,7 +71,7 @@ class SubgraphFetcher:
         query = """
         query GetRiskyPositions($threshold: BigDecimal!, $limit: Int!) {
             positions(
-                where: { healthFactor_lt: $threshold, isActive: true }
+                where: { healthFactor_lt: $threshold }
                 orderBy: healthFactor
                 orderDirection: asc
                 first: $limit
@@ -122,7 +122,7 @@ class SubgraphFetcher:
                 totalBorrowed
                 liquidationCount
                 lastUpdated
-                positions(where: { isActive: true }) {
+                positions {
                     id
                     collateralAsset
                     collateralAmount
@@ -242,7 +242,7 @@ class SubgraphFetcher:
         query = f"""
         query GetPositionsByAsset($asset: String!, $limit: Int!) {{
             positions(
-                where: {{ {field}: $asset, isActive: true }}
+                where: {{ {field}: $asset }}
                 orderBy: healthFactor
                 orderDirection: asc
                 first: $limit

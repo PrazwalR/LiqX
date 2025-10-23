@@ -22,8 +22,10 @@ AGENT_SEED = os.getenv('AGENT_SEED_EXECUTOR', 'executor-seed-default')
 # Deployment mode
 DEPLOY_MODE = os.getenv('DEPLOY_MODE', 'local')  # 'local' or 'almanac'
 
-# Demo mode
+# Operation modes
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
+PRESENTATION_MODE = os.getenv('PRESENTATION_MODE', 'false').lower() == 'true'
+PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
 
 # Position Monitor address (updated from config/agent_addresses.json)
 POSITION_MONITOR_ADDRESS = "agent1qvvp0sl4xwj04jjheaqwl9na6n4ef8zqrv55qfw96jv2584ze0v6cehs64a"

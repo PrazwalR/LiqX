@@ -17,10 +17,13 @@ from agents.message_protocols import (
     DemoPriceUpdate,
     ExecutionResult,
     HealthCheckRequest,
-    HealthCheckResponse
+    HealthCheckResponse,
+    PresentationTrigger  # NEW: For presentation mode
 )
 from agents.metta_reasoner import get_metta_reasoner
 from data.price_feeds import get_price_feed_manager
+from data.subgraph_fetcher import get_subgraph_fetcher
+from data.sepolia_tokens import get_token_symbol
 from uagents import Agent, Context, Model
 import os
 import time
@@ -53,8 +56,14 @@ CRITICAL_HF = float(os.getenv('CRITICAL_HEALTH_FACTOR', '1.3'))
 MODERATE_HF = float(os.getenv('MODERATE_HEALTH_FACTOR', '1.5'))
 SAFE_HF = float(os.getenv('SAFE_HEALTH_FACTOR', '1.8'))
 
-# Demo mode
+# Operation modes
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
+PRESENTATION_MODE = os.getenv('PRESENTATION_MODE', 'false').lower() == 'true'
+PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
+
+# Presentation mode settings
+PRESENTATION_TRIGGER_SECRET = os.getenv(
+    'PRESENTATION_TRIGGER_SECRET', 'liqx_demo_2025')
 
 
 # ═══════════════════════════════════════════════════════
@@ -94,12 +103,14 @@ class PositionMonitorAgent:
         # State
         self.positions: Dict[str, Dict] = {}
         self.price_manager = get_price_feed_manager()
+        self.subgraph_fetcher = get_subgraph_fetcher()
         self.metta_reasoner = get_metta_reasoner()
         self.demo_crash_active = False
         self.demo_crash_id = None
         self.start_time = time.time()
         self.messages_processed = 0
         self.errors_count = 0
+        self.last_subgraph_fetch = 0  # Track last fetch time
 
         # Setup message handlers
         self._setup_handlers()
@@ -138,6 +149,82 @@ class PositionMonitorAgent:
         @self.agent.on_interval(period=30.0)
         async def monitor_positions(ctx: Context):
             """Monitor all positions every 30 seconds"""
+
+            # Fetch real positions in PRODUCTION or PRESENTATION mode
+            if not DEMO_MODE or PRESENTATION_MODE:
+                current_time = time.time()
+                # Fetch from subgraph every 30 seconds (or if first time)
+                if current_time - self.last_subgraph_fetch > 25:  # Slight buffer
+                    try:
+                        logger.info(
+                            "🔍 Fetching risky positions from subgraph...")
+
+                        # Get positions with HF < 2.0 (includes critical, high, moderate risk)
+                        risky_positions = await self.subgraph_fetcher.get_risky_positions(
+                            health_factor_threshold=2.0,
+                            limit=20
+                        )
+
+                        logger.info(
+                            f"📦 Subgraph returned {len(risky_positions)} positions")
+
+                        if risky_positions:
+                            mode_label = "🎬 PRESENTATION" if PRESENTATION_MODE else "🏭 PRODUCTION"
+                            logger.info(
+                                f"📊 [{mode_label}] Found {len(risky_positions)} risky positions from subgraph")
+
+                            # Convert subgraph positions to our internal format
+                            loaded_count = 0
+                            for pos in risky_positions:
+                                try:
+                                    user_id = pos['user']['id']
+                                    position_id = pos['id']
+
+                                    # Get token addresses and map to symbols
+                                    collateral_asset = pos['collateralAsset']
+                                    debt_asset = pos['debtAsset']
+
+                                    # Map addresses to token symbols for price lookups
+                                    collateral_token = get_token_symbol(
+                                        collateral_asset)
+                                    debt_token = get_token_symbol(debt_asset)
+
+                                    # Parse position data
+                                    self.positions[user_id] = {
+                                        'position_id': position_id,
+                                        'protocol': 'aave-v3',  # All positions from LiqX subgraph are Aave V3
+                                        'chain': 'ethereum-sepolia',  # Sepolia testnet
+                                        'collateral_asset': collateral_asset,
+                                        'collateral_token': collateral_token,
+                                        'collateral_amount': float(pos['collateralAmount']),
+                                        'debt_asset': debt_asset,
+                                        'debt_token': debt_token,
+                                        'debt_amount': float(pos['debtAmount']),
+                                        'health_factor': float(pos['healthFactor']),
+                                        'last_updated': pos['updatedAt']
+                                    }
+                                    loaded_count += 1
+                                except Exception as parse_error:
+                                    logger.warning(
+                                        f"Failed to parse position: {parse_error}")
+                                    continue
+
+                            logger.success(
+                                f"✅ Loaded {loaded_count} positions for monitoring")
+                        else:
+                            logger.info(
+                                "✨ No risky positions found - all positions healthy!")
+
+                        self.last_subgraph_fetch = current_time
+
+                    except Exception as e:
+                        logger.error(
+                            f"❌ Failed to fetch positions from subgraph: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        self.errors_count += 1
+
+            # Now monitor all loaded positions
             if not self.positions:
                 logger.debug("No positions to monitor")
                 return
@@ -223,6 +310,72 @@ class PositionMonitorAgent:
 
             await ctx.send(sender, response)
             logger.debug(f"📋 Health check response sent to {sender}")
+
+        @self.agent.on_message(model=PresentationTrigger)
+        async def handle_presentation_trigger(ctx: Context, sender: str, msg: PresentationTrigger):
+            """Handle manual triggers for live presentations - PRESENTATION_MODE only"""
+
+            # Security check: Only allow in PRESENTATION_MODE
+            if not PRESENTATION_MODE:
+                logger.warning(
+                    "🚫 PRESENTATION TRIGGER REJECTED: Not in PRESENTATION_MODE")
+                return
+
+            # Validate secret
+            if msg.secret != PRESENTATION_TRIGGER_SECRET:
+                logger.error("🚫 PRESENTATION TRIGGER REJECTED: Invalid secret")
+                return
+
+            logger.warning("🎯 PRESENTATION TRIGGER RECEIVED!")
+            logger.info(f"   Trigger ID: {msg.trigger_id}")
+            logger.info(f"   Trigger Type: {msg.trigger_type}")
+
+            if msg.trigger_type == "market_crash":
+                # Simulate ETH price crash
+                eth_drop = msg.eth_price_drop_percent or 30.0
+                current_eth_price = await self.price_manager.get_token_price("WETH")
+                if current_eth_price:
+                    new_price = current_eth_price * (1 - eth_drop / 100)
+                    self.price_manager.set_mock_price("WETH", new_price)
+                    self.price_manager.set_mock_price("ETH", new_price)
+                    logger.warning(
+                        f"🚨 SIMULATED MARKET CRASH: ETH ${current_eth_price:.2f} → ${new_price:.2f} (-{eth_drop}%)")
+
+                    # Recalculate all positions with new price
+                    for user_address, position_data in self.positions.items():
+                        await self._check_position(ctx, user_address, position_data)
+
+            elif msg.trigger_type == "alert_position":
+                # Force alert for specific position
+                if msg.target_position_id and msg.target_position_id in [p.get('position_id') for p in self.positions.values()]:
+                    for user_address, position_data in self.positions.items():
+                        if position_data.get('position_id') == msg.target_position_id:
+                            logger.warning(
+                                f"🎯 FORCING ALERT for position {msg.target_position_id}")
+                            await self._check_position(ctx, user_address, position_data)
+                            break
+                elif self.positions:
+                    # Alert first position if no specific target
+                    first_user = list(self.positions.keys())[0]
+                    logger.warning(
+                        f"🎯 FORCING ALERT for first position: {first_user}")
+                    await self._check_position(ctx, first_user, self.positions[first_user])
+
+            elif msg.trigger_type == "price_drop":
+                # Set custom price for specific token
+                if msg.target_token and msg.custom_price:
+                    self.price_manager.set_mock_price(
+                        msg.target_token, msg.custom_price)
+                    logger.warning(
+                        f"📉 CUSTOM PRICE SET: {msg.target_token} → ${msg.custom_price:.2f}")
+
+                    # Recalculate all positions
+                    for user_address, position_data in self.positions.items():
+                        await self._check_position(ctx, user_address, position_data)
+
+            self.messages_processed += 1
+            logger.success(
+                f"✅ Presentation trigger '{msg.trigger_type}' executed successfully")
 
     async def _initialize_demo_positions(self, ctx: Context):
         """Initialize demo positions for testing"""

@@ -7,6 +7,8 @@ import os
 import time
 import asyncio
 import json
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from loguru import logger
 from uagents import Agent, Context, Bureau
 from uagents.setup import fund_agent_if_low
@@ -17,16 +19,92 @@ from agents.message_protocols import SwapRoute, ExecutionResult, HealthCheckRequ
 # ═══════════════════════════════════════════════════════
 
 AGENT_PORT = int(os.getenv('EXECUTOR_PORT', '8003'))
+HTTP_PORT = int(os.getenv('EXECUTOR_HTTP_PORT', '8121'))
 AGENT_SEED = os.getenv('AGENT_SEED_EXECUTOR', 'executor-seed-default')
 
 # Deployment mode
-DEPLOY_MODE = os.getenv('DEPLOY_MODE', 'local')  # 'local' or 'almanac'
+DEPLOY_MODE = 'local'  # Hardcoded: Almanac not needed for HTTP-based presentation
 
-# Demo mode
+# Operation modes
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
+PRESENTATION_MODE = os.getenv('PRESENTATION_MODE', 'false').lower() == 'true'
+PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
 
 # Position Monitor address (updated from config/agent_addresses.json)
 POSITION_MONITOR_ADDRESS = "agent1qvvp0sl4xwj04jjheaqwl9na6n4ef8zqrv55qfw96jv2584ze0v6cehs64a"
+
+
+# ═══════════════════════════════════════════════════════
+# HTTP API SERVER
+# ═══════════════════════════════════════════════════════
+
+# Global reference to agent instance for HTTP handler
+_agent_instance = None
+
+
+class ExecutorAPIHandler(BaseHTTPRequestHandler):
+    """HTTP handler for executor API"""
+
+    def do_GET(self):
+        """Handle GET requests"""
+        global _agent_instance
+
+        if self.path == '/messages':
+            # Return message history
+            if _agent_instance:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'messages': _agent_instance.message_history[-50:],
+                    'total': len(_agent_instance.message_history)
+                }).encode())
+            else:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'messages': [],
+                    'total': 0
+                }).encode())
+
+        elif self.path == '/health':
+            # Health check
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            self.wfile.write(json.dumps({
+                'status': 'ok',
+                'timestamp': int(time.time() * 1000)
+            }).encode())
+
+        else:
+            self.send_response(404)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            self.wfile.write(json.dumps({
+                'error': 'Not found'
+            }).encode())
+
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP server logs
+
+
+def start_http_server(port: int):
+    """Start HTTP server in background thread"""
+    server = HTTPServer(('0.0.0.0', port), ExecutorAPIHandler)
+    logger.info(f"🌐 HTTP API server listening on port {port}")
+    server.serve_forever()
 
 
 # ═══════════════════════════════════════════════════════
@@ -75,12 +153,39 @@ class CrossChainExecutor:
         self.executions_success = 0
         self.executions_failed = 0
 
+        # Message history for frontend activity feed
+        self.message_history = []
+        self.max_messages = 100
+
         # Setup handlers
         self._setup_handlers()
 
         logger.info(f"Cross-Chain Executor Agent initialized")
         logger.info(f"Agent address: {self.agent.address}")
         logger.info(f"Port: {AGENT_PORT}")
+
+    def _log_message(self, direction: str, message_type: str, recipient: str = None, sender: str = None, details: dict = None):
+        """Log agent communication message"""
+        import datetime
+
+        message_log = {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'direction': direction,  # 'sent' or 'received'
+            'message_type': message_type,
+            'from': sender if direction == 'received' else 'Cross-Chain Executor',
+            'to': recipient if direction == 'sent' else 'Cross-Chain Executor',
+            'details': details or {}
+        }
+
+        self.message_history.append(message_log)
+
+        # Keep only last N messages
+        if len(self.message_history) > self.max_messages:
+            self.message_history = self.message_history[-self.max_messages:]
+
+        # Log to console
+        arrow = '→' if direction == 'sent' else '←'
+        logger.info(f"💬 {arrow} {message_type}: {sender or recipient}")
 
     def _setup_handlers(self):
         """Setup all message handlers"""
@@ -96,6 +201,15 @@ class CrossChainExecutor:
         @self.agent.on_message(model=SwapRoute)
         async def handle_swap_route(ctx: Context, sender: str, msg: SwapRoute):
             """Handle swap route from Swap Optimizer"""
+
+            # Log received message
+            self._log_message('received', 'SwapRoute', sender=sender, details={
+                'route_id': msg.route_id[:8] + '...',
+                'from': msg.from_token,
+                'to': msg.to_token,
+                'amount_usd': f'${msg.amount:.2f}'
+            })
+
             logger.warning("⚠️  SWAP ROUTE RECEIVED")
             logger.info(f"   Route ID: {msg.route_id}")
             logger.info(f"   From: {msg.from_token}")
@@ -132,6 +246,12 @@ class CrossChainExecutor:
                     status=status
                 )
 
+                # Log sent message
+                self._log_message('sent', 'ExecutionResult', recipient='Position Monitor', details={
+                    'execution_id': msg.route_id[:8] + '...',
+                    'status': status
+                })
+
                 await ctx.send(POSITION_MONITOR_ADDRESS, result)
                 logger.info(f"   → Sent ExecutionResult to Position Monitor")
 
@@ -144,6 +264,13 @@ class CrossChainExecutor:
                     execution_id=msg.route_id,
                     status="failed"
                 )
+
+                # Log sent message
+                self._log_message('sent', 'ExecutionResult', recipient='Position Monitor', details={
+                    'execution_id': msg.route_id[:8] + '...',
+                    'status': 'failed'
+                })
+
                 await ctx.send(POSITION_MONITOR_ADDRESS, result)
 
         @self.agent.on_message(model=HealthCheckRequest)
@@ -228,12 +355,21 @@ class CrossChainExecutor:
 
     def run(self):
         """Run the agent"""
+        global _agent_instance
+        _agent_instance = self
+
+        # Start HTTP server in background thread
+        http_thread = threading.Thread(
+            target=start_http_server, args=(HTTP_PORT,), daemon=True)
+        http_thread.start()
+
         logger.info("=" * 60)
         logger.info("Cross-Chain Executor Agent - LiquidityGuard AI")
         logger.info("🔄 MULTI-STEP TRANSACTION EXECUTION")
         logger.info("=" * 60)
         logger.info(f"Agent Address: {self.agent.address}")
         logger.info(f"Port: {AGENT_PORT}")
+        logger.info(f"HTTP API Port: {HTTP_PORT}")
         logger.info(f"Demo Mode: {DEMO_MODE}")
         logger.info(f"Position Monitor: {POSITION_MONITOR_ADDRESS[:10]}...")
         logger.info("=" * 60)

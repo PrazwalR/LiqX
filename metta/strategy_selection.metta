@@ -57,16 +57,12 @@
 ;;; ─────────────────────────────────────────────────────────────
 
 ;; Calculate annual profit from APY improvement
-(: calculate-annual-profit (-> Number Number Number))
+(: calculate-annual-profit (-> Number Number Number Number))  ; 3 args + return = 4 total
 (= (calculate-annual-profit $amount $current-apy $target-apy)
-   (let (
-     ($apy-diff (- $target-apy $current-apy))
-     ($annual-gain (* $amount (/ $apy-diff 100)))
-   )
-   $annual-gain))
+   (* $amount (/ (- $target-apy $current-apy) 100)))
 
 ;; Calculate break-even time in months
-(: break-even-months (-> Number Number Number))
+(: break-even-months (-> Number Number Number))  ; 2 args + return = 3 total
 (= (break-even-months $annual-profit $execution-cost)
    (if (> $annual-profit 0)
        (* 12 (/ $execution-cost $annual-profit))
@@ -75,8 +71,7 @@
 ;; Is strategy profitable?
 (: is-profitable (-> Number Number Number Boolean))
 (= (is-profitable $annual-profit $execution-cost $max-months)
-   (let ($break-even (break-even-months $annual-profit $execution-cost))
-     (< $break-even $max-months)))
+   (< (break-even-months $annual-profit $execution-cost) $max-months))
 
 ;;; ─────────────────────────────────────────────────────────────
 ;;; COST ESTIMATION
@@ -120,42 +115,42 @@
 ;; Score a strategy (0-100)
 (: score-strategy (-> Number Number Number Number Number))
 (= (score-strategy $apy-improvement $break-even-months $urgency $amount)
-   (let (
+   (+
      ;; APY component (0-40 points)
-     ($apy-score (min 40 (* $apy-improvement 8)))
-     ;; Break-even component (0-30 points)
-     ($break-even-score (if (< $break-even-months 1) 30
-                            (if (< $break-even-months 3) 20
-                                (if (< $break-even-months 6) 10 0))))
-     ;; Urgency component (0-20 points)
-     ($urgency-score (* $urgency 2))
-     ;; Amount component (0-10 points)
-     ($amount-score (if (> $amount 100000) 10
-                        (if (> $amount 50000) 7
-                            (if (> $amount 10000) 4 2))))
-   )
-   (+ $apy-score (+ $break-even-score (+ $urgency-score $amount-score)))))
+     (if (> (* $apy-improvement 8) 40) 40 (* $apy-improvement 8))
+     (+
+       ;; Break-even component (0-30 points)
+       (if (< $break-even-months 1) 30
+         (if (< $break-even-months 3) 20
+           (if (< $break-even-months 6) 10 0)))
+       (+
+         ;; Urgency component (0-20 points)
+         (* $urgency 2)
+         ;; Amount component (0-10 points)
+         (if (> $amount 100000) 10
+           (if (> $amount 50000) 7
+             (if (> $amount 10000) 4 2)))))))
 
 ;;; ─────────────────────────────────────────────────────────────
 ;;; EXECUTION METHOD SELECTION
 ;;; ─────────────────────────────────────────────────────────────
 
 ;; Choose optimal execution method
-(: select-execution-method (-> String String Number String String))
+;; Signature: from_chain, to_chain, amount, urgency -> method
+(: select-execution-method (-> String String Number Number String))
 (= (select-execution-method $from-chain $to-chain $amount $urgency)
    (if (== $from-chain $to-chain)
        ;; Same chain - use direct swap
        "direct-swap"
        ;; Cross-chain
-       (match (list $urgency $amount)
-         ;; High urgency + large amount -> LayerZero PYUSD
-         ((list $u $a) (if (and (>= $u 7) (> $a 50000))
-                          "layerzero-pyusd"
-                          ;; Medium urgency -> Standard bridge
-                          (if (>= $u 5)
-                              "standard-bridge"
-                              ;; Low urgency -> 1inch Fusion (cheapest)
-                              "fusion-cross-chain"))))))
+       (if (and (>= $urgency 7) (> $amount 50000))
+           ;; High urgency + large amount -> LayerZero PYUSD
+           "layerzero-pyusd"
+           ;; Medium urgency -> Standard bridge
+           (if (>= $urgency 5)
+               "standard-bridge"
+               ;; Low urgency -> 1inch Fusion (cheapest)
+               "fusion-cross-chain"))))
 
 ;;; ─────────────────────────────────────────────────────────────
 ;;; STRATEGY GENERATION

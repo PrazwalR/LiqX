@@ -9,10 +9,17 @@ Integrates MeTTa symbolic reasoning with Python agents for:
 """
 
 import os
-import subprocess
-import json
 from typing import Dict, List, Optional, Any
 from loguru import logger
+
+try:
+    from hyperon import MeTTa, E, S, V
+    HYPERON_AVAILABLE = True
+    logger.success(
+        "✅ Hyperon module loaded - using real MeTTa symbolic reasoning")
+except ImportError:
+    HYPERON_AVAILABLE = False
+    logger.warning("⚠️  Hyperon not available - using fallback logic")
 
 
 class MeTTaReasoner:
@@ -33,48 +40,66 @@ class MeTTaReasoner:
         self.strategy_file = os.path.join(
             self.metta_path, "strategy_selection.metta")
 
-        # Check if MeTTa interpreter is available
-        self.metta_available = self._check_metta_availability()
+        # Initialize MeTTa runtime
+        self.metta_available = HYPERON_AVAILABLE
+        self.metta = None
 
         if self.metta_available:
-            logger.info("✅ MeTTa reasoning engine initialized")
-        else:
-            logger.warning(
-                "⚠️  MeTTa interpreter not found - using fallback logic")
+            try:
+                self.metta = MeTTa()
+                self._load_metta_files()
+                logger.info(
+                    "✅ MeTTa reasoning engine initialized with hyperon")
+            except Exception as e:
+                logger.error(f"Failed to initialize MeTTa: {e}")
+                self.metta_available = False
 
-    def _check_metta_availability(self) -> bool:
-        """Check if MeTTa interpreter is installed"""
-        try:
-            result = subprocess.run(
-                ["metta", "--version"],
-                capture_output=True,
-                timeout=5
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
-
-    def _execute_metta(self, code: str) -> Optional[str]:
-        """Execute MeTTa code and return result"""
         if not self.metta_available:
+            logger.warning(
+                "⚠️  MeTTa not available - agents will not use symbolic reasoning")
+
+    def _load_metta_files(self):
+        """Load MeTTa reasoning files into the runtime"""
+        if not self.metta:
+            return
+
+        try:
+            # Load risk assessment logic
+            if os.path.exists(self.risk_assessment_file):
+                with open(self.risk_assessment_file, 'r') as f:
+                    risk_code = f.read()
+                self.metta.run(risk_code)
+                logger.info(f"✅ Loaded {self.risk_assessment_file}")
+
+            # Load strategy selection logic
+            if os.path.exists(self.strategy_file):
+                with open(self.strategy_file, 'r') as f:
+                    strategy_code = f.read()
+                self.metta.run(strategy_code)
+                logger.info(f"✅ Loaded {self.strategy_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to load MeTTa files: {e}")
+
+    def _execute_metta(self, expression: str) -> Optional[Any]:
+        """Execute MeTTa expression and return result"""
+        if not self.metta_available or not self.metta:
             return None
 
         try:
-            result = subprocess.run(
-                ["metta", "-c", code],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
+            result = self.metta.run(expression)
+            if result and len(result) > 0:
+                # MeTTa returns a list of results
+                # Get the first result and convert to string
+                first_result = result[0]
+                result_str = str(first_result)
 
-            if result.returncode == 0:
-                return result.stdout.strip()
-            else:
-                logger.error(f"MeTTa execution error: {result.stderr}")
-                return None
+                # Check for errors in the result
+                if "Error" in result_str or "IncorrectNumberOfArguments" in result_str:
+                    logger.error(f"MeTTa execution error: {result_str}")
+                    return None
 
-        except subprocess.TimeoutExpired:
-            logger.error("MeTTa execution timeout")
+                return result_str
             return None
         except Exception as e:
             logger.error(f"MeTTa execution failed: {e}")
@@ -94,23 +119,18 @@ class MeTTaReasoner:
         Returns:
             Risk level: critical, high, moderate, low, or safe
         """
-        if self.metta_available:
-            code = f"!(calculate-risk-level {health_factor})"
-            result = self._execute_metta(code)
+        if self.metta_available and self.metta:
+            expression = f"!(calculate-risk-level {health_factor})"
+            result = self._execute_metta(expression)
             if result:
-                return result
+                # Clean up the result string
+                risk_level = result.strip('[]() ')
+                logger.debug(
+                    f"🧠 MeTTa risk calculation: HF={health_factor} -> {risk_level}")
+                return risk_level
 
-        # Fallback: Python logic
-        if health_factor < 1.3:
-            return "critical"
-        elif health_factor < 1.5:
-            return "high"
-        elif health_factor < 1.8:
-            return "moderate"
-        elif health_factor < 2.0:
-            return "low"
-        else:
-            return "safe"
+        logger.error("MeTTa reasoning not available for risk calculation")
+        raise RuntimeError("MeTTa reasoning is required but not available")
 
     def liquidation_probability(
         self,
@@ -127,23 +147,21 @@ class MeTTaReasoner:
         Returns:
             Probability (0-100%)
         """
-        if self.metta_available:
-            code = f"!(liquidation-probability {health_factor} {volatility})"
-            result = self._execute_metta(code)
+        if self.metta_available and self.metta:
+            expression = f"!(liquidation-probability {health_factor} {volatility})"
+            result = self._execute_metta(expression)
             if result:
                 try:
-                    return float(result)
+                    prob = float(result.strip('[]() '))
+                    logger.debug(
+                        f"🧠 MeTTa liquidation prob: HF={health_factor}, Vol={volatility} -> {prob}%")
+                    return prob
                 except ValueError:
                     pass
 
-        # Fallback: Python logic
-        base_prob = 100 if health_factor < 1.0 else \
-            80 if health_factor < 1.3 else \
-            40 if health_factor < 1.5 else \
-            15 if health_factor < 1.8 else 5
-
-        vol_multiplier = 1.0 + (volatility * 0.01)
-        return min(100.0, base_prob * vol_multiplier)
+        logger.error(
+            "MeTTa reasoning not available for liquidation probability")
+        raise RuntimeError("MeTTa reasoning is required but not available")
 
     def urgency_score(
         self,
@@ -162,30 +180,19 @@ class MeTTaReasoner:
         Returns:
             Urgency score (0-10)
         """
-        if self.metta_available:
-            code = f"!(urgency-score {health_factor} {liquidation_prob} {time_to_liquidation})"
-            result = self._execute_metta(code)
+        if self.metta_available and self.metta:
+            expression = f"!(urgency-score {health_factor} {liquidation_prob} {time_to_liquidation})"
+            result = self._execute_metta(expression)
             if result:
                 try:
-                    return int(float(result))
+                    score = int(float(result.strip('[]() ')))
+                    logger.debug(f"🧠 MeTTa urgency score: {score}/10")
+                    return score
                 except ValueError:
                     pass
 
-        # Fallback: Python logic
-        hf_score = 4 if health_factor < 1.3 else \
-            3 if health_factor < 1.5 else \
-            2 if health_factor < 1.8 else \
-            1 if health_factor < 2.0 else 0
-
-        prob_score = 3 if liquidation_prob > 70 else \
-            2 if liquidation_prob > 40 else \
-            1 if liquidation_prob > 15 else 0
-
-        time_score = 3 if time_to_liquidation < 600 else \
-            2 if time_to_liquidation < 3600 else \
-            1 if time_to_liquidation < 86400 else 0
-
-        return hf_score + prob_score + time_score
+        logger.error("MeTTa reasoning not available for urgency calculation")
+        raise RuntimeError("MeTTa reasoning is required but not available")
 
     def assess_risk(
         self,
@@ -203,63 +210,98 @@ class MeTTaReasoner:
         Returns:
             Dictionary with complete risk analysis
         """
-        risk_level = self.calculate_risk_level(health_factor)
-        liq_prob = self.liquidation_probability(health_factor, volatility)
-        urgency = self.urgency_score(health_factor, liq_prob, 3600)
+        try:
+            risk_level = self.calculate_risk_level(health_factor)
+            liq_prob = self.liquidation_probability(health_factor, volatility)
+            urgency = self.urgency_score(health_factor, liq_prob, 3600)
 
-        # Match risk scenario
-        scenario = self._match_risk_scenario(health_factor, collateral_usd)
+            # Match risk scenario
+            scenario = self._match_risk_scenario(health_factor, collateral_usd)
 
-        # Get recommended actions
-        actions = self._recommend_actions(scenario)
+            # Get recommended actions
+            actions = self._recommend_actions(scenario)
 
-        # Determine priority
-        priority = "EMERGENCY" if urgency >= 8 else \
-                   "HIGH" if urgency >= 6 else \
-                   "NORMAL" if urgency >= 5 else "LOW"
+            # Determine priority
+            priority = "EMERGENCY" if urgency >= 8 else \
+                       "HIGH" if urgency >= 6 else \
+                       "NORMAL" if urgency >= 5 else "LOW"
 
-        result = {
-            "risk_level": risk_level,
-            "scenario": scenario,
-            "liquidation_probability": liq_prob,
-            "urgency_score": urgency,
-            "execution_priority": priority,
-            "recommended_actions": actions,
-            "requires_immediate_action": urgency >= 7,
-            "reasoning": f"Health factor {health_factor:.2f} with {volatility:.1f}% volatility in {market_trend} market"
-        }
+            result = {
+                "risk_level": risk_level,
+                "scenario": scenario,
+                "liquidation_probability": liq_prob,
+                "urgency_score": urgency,
+                "execution_priority": priority,
+                "recommended_actions": actions,
+                "requires_immediate_action": urgency >= 7,
+                "reasoning": f"Health factor {health_factor:.2f} with {volatility:.1f}% volatility in {market_trend} market",
+                "using_metta": True  # Flag indicating real MeTTa was used
+            }
 
-        logger.info(
-            f"🧠 MeTTa Risk Assessment: {risk_level.upper()} (urgency: {urgency}/10)")
+            logger.info(
+                f"🧠 MeTTa Risk Assessment: {risk_level.upper()} (urgency: {urgency}/10)")
 
-        return result
+            return result
+
+        except Exception as e:
+            logger.error(f"MeTTa risk assessment failed: {e}")
+            # Return fallback response
+            simple_risk = "critical" if health_factor < 1.3 else "high" if health_factor < 1.5 else "moderate"
+            return {
+                "risk_level": simple_risk,
+                "scenario": "UNKNOWN",
+                "liquidation_probability": 50.0,
+                "urgency_score": 5,
+                "execution_priority": "NORMAL",
+                "recommended_actions": ["monitor"],
+                "requires_immediate_action": health_factor < 1.3,
+                "reasoning": f"Fallback assessment (MeTTa unavailable): HF {health_factor:.2f}",
+                "using_metta": False  # Flag indicating fallback was used
+            }
 
     def _match_risk_scenario(self, health_factor: float, collateral_usd: float) -> str:
-        """Match position to risk scenario"""
-        if health_factor < 1.2 and collateral_usd > 50000:
-            return "CRITICAL-LARGE-POSITION"
-        elif health_factor < 1.2:
-            return "CRITICAL-SMALL-POSITION"
-        elif health_factor < 1.5 and collateral_usd > 100000:
-            return "HIGH-RISK-WHALE"
-        elif health_factor < 1.5:
-            return "HIGH-RISK-RETAIL"
-        elif health_factor < 1.8:
-            return "MODERATE-RISK"
-        else:
-            return "LOW-RISK"
+        """Match position to risk scenario using MeTTa"""
+        if self.metta_available and self.metta:
+            expression = f"!(match-risk-scenario {health_factor} {collateral_usd})"
+            result = self._execute_metta(expression)
+            if result:
+                # MeTTa returns symbols without quotes, convert to uppercase string
+                scenario = result.strip('[]() ').replace('-', '_').upper()
+                logger.debug(f"🧠 MeTTa scenario match: {scenario}")
+                return scenario
+
+        logger.error("MeTTa reasoning not available for scenario matching")
+        raise RuntimeError("MeTTa reasoning is required but not available")
 
     def _recommend_actions(self, scenario: str) -> List[str]:
-        """Generate action recommendations"""
-        action_map = {
-            "CRITICAL-LARGE-POSITION": ["emergency-rebalance", "immediate-notification", "whale-protocol"],
-            "CRITICAL-SMALL-POSITION": ["urgent-rebalance", "user-notification", "standard-protocol"],
-            "HIGH-RISK-WHALE": ["proactive-rebalance", "whale-protocol", "multi-chain-optimization"],
-            "HIGH-RISK-RETAIL": ["scheduled-rebalance", "standard-protocol", "single-chain-optimization"],
-            "MODERATE-RISK": ["monitor-closely", "opportunistic-rebalance"],
-            "LOW-RISK": ["routine-monitoring"]
-        }
-        return action_map.get(scenario, ["manual-review"])
+        """Generate action recommendations using MeTTa"""
+        if self.metta_available and self.metta:
+            # Convert scenario string to symbol format (remove underscores, lowercase with hyphens)
+            scenario_symbol = scenario.replace('_', '-')
+            expression = f'!(recommend-action {scenario_symbol})'
+            result = self._execute_metta(expression)
+            if result:
+                # Parse the cons list result from MeTTa
+                # Result format: (cons action1 (cons action2 (cons action3 empty)))
+                actions_str = result.strip('[]() ')
+
+                # Extract actions by finding symbols between 'cons' and next 'cons' or 'empty'
+                actions = []
+                parts = actions_str.split()
+                i = 0
+                while i < len(parts):
+                    if parts[i] == 'cons' and i + 1 < len(parts):
+                        action = parts[i + 1].strip('()')
+                        if action != 'empty' and action != 'cons':
+                            actions.append(action.replace('-', '_'))
+                    i += 1
+
+                logger.debug(f"🧠 MeTTa actions for {scenario}: {actions}")
+                return actions if actions else ["manual-review"]
+
+        logger.error(
+            "MeTTa reasoning not available for action recommendations")
+        raise RuntimeError("MeTTa reasoning is required but not available")
 
     # ═══════════════════════════════════════════════════════
     # STRATEGY SELECTION
@@ -273,23 +315,56 @@ class MeTTaReasoner:
         execution_cost: float
     ) -> Dict[str, float]:
         """
-        Calculate strategy profitability
+        Calculate strategy profitability using MeTTa
 
         Returns:
             Dict with annual_profit, break_even_months, is_profitable
         """
         apy_diff = target_apy - current_apy
-        annual_profit = amount * (apy_diff / 100)
 
-        break_even_months = (execution_cost * 12 /
-                             annual_profit) if annual_profit > 0 else 999
-        is_profitable = break_even_months < 6
+        if self.metta_available and self.metta:
+            try:
+                # Calculate using MeTTa
+
+                # Annual profit calculation
+                expr_profit = f"!(calculate-annual-profit {amount} {current_apy} {target_apy})"
+                result_profit = self._execute_metta(expr_profit)
+
+                if result_profit:
+                    annual_profit = float(result_profit.strip('[]() '))
+
+                    # Break-even calculation
+                    expr_breakeven = f"!(break-even-months {annual_profit} {execution_cost})"
+                    result_breakeven = self._execute_metta(expr_breakeven)
+
+                    if result_breakeven:
+                        break_even_months = float(
+                            result_breakeven.strip('[]() '))
+                        is_profitable = break_even_months < 6
+
+                        logger.debug(
+                            f"🧠 MeTTa profitability: profit=${annual_profit:.2f}, break-even={break_even_months:.1f}mo")
+
+                        return {
+                            "annual_profit": annual_profit,
+                            "apy_improvement": apy_diff,
+                            "break_even_months": break_even_months,
+                            "is_profitable": is_profitable
+                        }
+            except Exception as e:
+                logger.warning(f"MeTTa profitability calculation failed: {e}")
+
+        # Fallback calculation
+        logger.debug("Using fallback profitability calculation")
+        annual_profit = amount * (apy_diff / 100)
+        break_even_months = (execution_cost * 12) / \
+            annual_profit if annual_profit > 0 else 999
 
         return {
             "annual_profit": annual_profit,
             "apy_improvement": apy_diff,
             "break_even_months": break_even_months,
-            "is_profitable": is_profitable
+            "is_profitable": break_even_months < 6
         }
 
     def score_strategy(
@@ -304,28 +379,19 @@ class MeTTaReasoner:
 
         Uses MeTTa reasoning for intelligent scoring
         """
-        # APY component (0-40 points)
-        apy_score = min(40, apy_improvement * 8)
+        if self.metta_available and self.metta:
+            expression = f"!(score-strategy {apy_improvement} {break_even_months} {urgency} {amount})"
+            result = self._execute_metta(expression)
+            if result:
+                try:
+                    score = float(result.strip('[]() '))
+                    logger.debug(f"🧠 MeTTa strategy score: {score}/100")
+                    return score
+                except ValueError:
+                    pass
 
-        # Break-even component (0-30 points)
-        break_even_score = 30 if break_even_months < 1 else \
-            20 if break_even_months < 3 else \
-            10 if break_even_months < 6 else 0
-
-        # Urgency component (0-20 points)
-        urgency_score = urgency * 2
-
-        # Amount component (0-10 points)
-        amount_score = 10 if amount > 100000 else \
-            7 if amount > 50000 else \
-            4 if amount > 10000 else 2
-
-        total_score = apy_score + break_even_score + urgency_score + amount_score
-
-        logger.debug(
-            f"Strategy score: {total_score:.1f}/100 (APY: {apy_score}, BE: {break_even_score}, Urgency: {urgency_score}, Amount: {amount_score})")
-
-        return total_score
+        logger.error("MeTTa reasoning not available for strategy scoring")
+        raise RuntimeError("MeTTa reasoning is required but not available")
 
     def select_execution_method(
         self,
@@ -340,19 +406,18 @@ class MeTTaReasoner:
         Returns:
             Execution method: direct-swap, layerzero-pyusd, standard-bridge, fusion-cross-chain
         """
-        if from_chain == to_chain:
-            return "direct-swap"
+        if self.metta_available and self.metta:
+            # Pass urgency as number (not string)
+            expression = f'!(select-execution-method "{from_chain}" "{to_chain}" {amount} {urgency})'
+            result = self._execute_metta(expression)
+            if result:
+                method = result.strip('[]() "')
+                logger.debug(f"🧠 MeTTa execution method: {method}")
+                return method
 
-        # High urgency + large amount -> LayerZero PYUSD
-        if urgency >= 7 and amount > 50000:
-            return "layerzero-pyusd"
-
-        # Medium urgency -> Standard bridge
-        if urgency >= 5:
-            return "standard-bridge"
-
-        # Low urgency -> 1inch Fusion (cheapest)
-        return "fusion-cross-chain"
+        logger.error(
+            "MeTTa reasoning not available for execution method selection")
+        raise RuntimeError("MeTTa reasoning is required but not available")
 
     def select_optimal_strategy(
         self,

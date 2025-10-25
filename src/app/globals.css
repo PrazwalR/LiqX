@@ -1,5 +1,285 @@
 @import "tailwindcss";
 
+/* ============ Custom Properties ============ */
+:root {
+  --gradient-from: #667eea;
+  --gradient-via1: #764ba2;
+  --gradient-via2: #f093fb;
+  --gradient-to: #4facfe;
+
+  --bg-dark: #0A0B14;
+  --bg-darker: #1A1B2E;
+  --bg-card: rgba(255, 255, 255, 0.05);
+
+  --status-safe: #10B981;
+  --status-warning: #F59E0B;
+  --status-critical: #EF4444;
+}
+
+/* ============ Base Styles ============ */
+body {
+  background: var(--bg-dark);
+  color: white;
+  font-family: var(--font-geist-sans);
+}
+
+/* ============ Glassmorphism Utilities ============ */
+.glass-card {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+}
+
+.glass-card-hover {
+  transition: all 0.3s ease;
+}
+
+.glass-card-hover:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-2px);
+}
+
+/* ============ Gradient Backgrounds ============ */
+.gradient-bg {
+  background: linear-gradient(135deg,
+      var(--gradient-from) 0%,
+      var(--gradient-via1) 25%,
+      var(--gradient-via2) 75%,
+      var(--gradient-to) 100%);
+}
+
+.gradient-bg-animated {
+  background: linear-gradient(135deg,
+      var(--gradient-from),
+      var(--gradient-via1),
+      var(--gradient-via2),
+      var(--gradient-to));
+  background-size: 400% 400%;
+  animation: gradientShift 15s ease infinite;
+}
+
+@keyframes gradientShift {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+/* ============ Status Indicators ============ */
+.status-safe {
+  color: var(--status-safe);
+}
+
+.status-warning {
+  color: var(--status-warning);
+}
+
+.status-critical {
+  color: var(--status-critical);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-dot-safe {
+  background-color: var(--status-safe);
+  box-shadow: 0 0 8px var(--status-safe);
+}
+
+.status-dot-warning {
+  background-color: var(--status-warning);
+  box-shadow: 0 0 8px var(--status-warning);
+}
+
+.status-dot-critical {
+  background-color: var(--status-critical);
+  box-shadow: 0 0 8px var(--status-critical);
+}
+
+.status-dot-pulse {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* ============ Chart Styles ============ */
+.chart-container {
+  width: 100%;
+  height: 100%;
+}
+
+.recharts-tooltip-wrapper {
+  z-index: 50;
+}
+
+.recharts-default-tooltip {
+  background: rgba(10, 11, 20, 0.95) !important;
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 8px !important;
+  padding: 12px !important;
+}
+
+/* ============ Scrollbar Styles ============ */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* ============ Animation Utilities ============ */
+.fade-in {
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.slide-in-right {
+  animation: slideInRight 0.3s ease-out;
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ============ Loading States ============ */
+.skeleton {
+  background: linear-gradient(90deg,
+      rgba(255, 255, 255, 0.05) 25%,
+      rgba(255, 255, 255, 0.1) 50%,
+      rgba(255, 255, 255, 0.05) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* ============ Button Styles ============ */
+.btn-primary {
+  background: linear-gradient(135deg, var(--gradient-from), var(--gradient-via1));
+  color: white;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: all 0.3s ease;
+  border: none;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 16px rgba(102, 126, 234, 0.4);
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: all 0.3s ease;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* ============ Typography ============ */
+.text-gradient {
+  background: linear-gradient(135deg, var(--gradient-from), var(--gradient-to));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* ============ Responsive Utilities ============ */
+@media (max-width: 768px) {
+  .glass-card {
+    border-radius: 12px;
+  }
+
+  .btn-primary,
+  .btn-secondary {
+    padding: 10px 20px;
+    font-size: 14px;
+  }
+}
+
 :root {
   --background: #ffffff;
   --foreground: #171717;

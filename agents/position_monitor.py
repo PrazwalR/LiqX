@@ -48,8 +48,8 @@ AGENT_SEED = os.getenv('AGENT_SEED_POSITION_MONITOR', 'monitor-seed-default')
 AGENT_PORT = int(os.getenv('POSITION_MONITOR_PORT', '8000'))
 YIELD_OPTIMIZER_ADDRESS = None  # Will be set after agent registration
 
-# Deployment mode
-DEPLOY_MODE = os.getenv('DEPLOY_MODE', 'local')  # 'local' or 'almanac'
+# Deployment mode - FORCE LOCAL for presentation (no Almanac overhead)
+DEPLOY_MODE = 'local'  # Hardcoded: Almanac not needed for HTTP-based presentation
 
 # Risk thresholds
 CRITICAL_HF = float(os.getenv('CRITICAL_HEALTH_FACTOR', '1.3'))
@@ -112,6 +112,19 @@ class PositionMonitorAgent:
         self.errors_count = 0
         self.last_subgraph_fetch = 0  # Track last fetch time
 
+        # Alert deduplication - track which positions have been alerted
+        # user_address -> last_alerted_timestamp
+        self.alerted_positions: Dict[str, float] = {}
+        # 30 minutes cooldown between alerts for same position (prevents spam)
+        self.alert_cooldown = 1800
+
+        # Message history for frontend display (last 50 messages)
+        self.message_history = []
+        self.max_messages = 50
+
+        # Start HTTP server for message history
+        self._start_http_server()
+
         # Setup message handlers
         self._setup_handlers()
 
@@ -119,6 +132,184 @@ class PositionMonitorAgent:
         logger.info(f"Agent address: {self.agent.address}")
         logger.info(f"Port: {AGENT_PORT}")
         logger.info(f"Demo mode: {DEMO_MODE}")
+
+    def _start_http_server(self):
+        """Start HTTP server to expose message history and accept position monitoring requests"""
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import json
+        import threading
+
+        class MessageHistoryHandler(BaseHTTPRequestHandler):
+            agent_instance = None
+
+            def do_GET(self):
+                if self.path == '/messages':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+
+                    response = {
+                        'success': True,
+                        'messages': self.agent_instance.message_history,
+                        'total': len(self.agent_instance.message_history)
+                    }
+                    self.wfile.write(json.dumps(response).encode())
+                elif self.path == '/health':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok'}).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                if self.path == '/monitor-position':
+                    try:
+                        # Read request body
+                        content_length = int(self.headers['Content-Length'])
+                        post_data = self.rfile.read(content_length)
+                        position_data = json.loads(post_data.decode())
+
+                        # Debug: Log received data
+                        logger.debug(
+                            f"📥 Received position data keys: {list(position_data.keys())}")
+
+                        # Add position to monitoring list
+                        # API sends: position_id, user_address, protocol, chain, collateral_value, debt_value, health_factor, etc.
+                        user_address = position_data.get(
+                            'user_address', position_data.get('user', 'unknown'))
+                        position_id = position_data.get('position_id', position_data.get(
+                            'id', user_address))  # Fallback to user_address if no ID
+
+                        if not user_address or user_address == 'unknown':
+                            raise ValueError(
+                                f"Missing user_address in position data. Keys: {list(position_data.keys())}")
+
+                        # Use real protocol data from position
+                        protocol = position_data.get('protocol', 'aave-v3')
+                        chain = position_data.get('chain', 'ethereum-sepolia')
+
+                        self.agent_instance.positions[user_address] = {
+                            'position_id': position_id,
+                            'protocol': protocol,
+                            'chain': chain,
+                            'collateral_asset': '',  # Not critical for presentation
+                            'collateral_token': position_data.get('collateral_token', ''),
+                            'collateral_amount': position_data.get('collateral_amount', position_data.get('totalCollateralUSD', 0)),
+                            'debt_asset': '',
+                            'debt_token': position_data.get('debt_token', ''),
+                            'debt_amount': position_data.get('debt_amount', position_data.get('totalDebtUSD', 0)),
+                            'health_factor': position_data.get('health_factor', position_data.get('healthFactor', 0)),
+                            'last_updated': int(time.time())
+                        }
+
+                        # Clear alert cooldown for this position to allow immediate demo
+                        if user_address in self.agent_instance.alerted_positions:
+                            logger.info(
+                                f"   🔄 Clearing alert cooldown for user (allow immediate processing)")
+                            del self.agent_instance.alerted_positions[user_address]
+
+                        logger.success(
+                            f"📌 Added position {position_id[:8] if len(position_id) > 8 else position_id}... to monitoring")
+                        logger.info(f"   User: {user_address[:10]}...")
+                        logger.info(
+                            f"   Health Factor: {position_data.get('health_factor', position_data.get('healthFactor', 0)):.2f}")
+                        logger.info(
+                            f"   Collateral: ${position_data.get('collateral_value', position_data.get('totalCollateralUSD', 0)):.2f}")
+
+                        # Log the addition
+                        self.agent_instance._log_message(
+                            'received',
+                            'MonitorPositionRequest',
+                            sender='Frontend',
+                            details={
+                                'position_id': position_id,
+                                'health_factor': position_data.get('health_factor', position_data.get('healthFactor', 0)),
+                                'collateral_value': position_data.get('collateral_value', position_data.get('totalCollateralUSD', 0))
+                            }
+                        )
+
+                        # Send success response
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self.end_headers()
+
+                        response = {
+                            'success': True,
+                            'message': 'Position added to monitoring',
+                            'monitoring_count': len(self.agent_instance.positions)
+                        }
+                        self.wfile.write(json.dumps(response).encode())
+
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"Failed to add position: {e}")
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+                        self.send_response(500)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({
+                            'success': False,
+                            'error': str(e)
+                        }).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_OPTIONS(self):
+                # Handle CORS preflight
+                self.send_response(200)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods',
+                                 'GET, POST, OPTIONS')
+                self.send_header(
+                    'Access-Control-Allow-Headers', 'Content-Type')
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                pass  # Suppress HTTP server logs
+
+        MessageHistoryHandler.agent_instance = self
+
+        def run_server():
+            server = HTTPServer(('localhost', 8101), MessageHistoryHandler)
+            logger.info(f"📡 HTTP server started on port 8101")
+            logger.info(f"   - GET /messages (message history)")
+            logger.info(f"   - GET /health (health check)")
+            logger.info(
+                f"   - POST /monitor-position (add position to monitoring)")
+            server.serve_forever()
+
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
+
+    def _log_message(self, direction: str, message_type: str, recipient: str = None, sender: str = None, details: dict = None):
+        """Log agent communication message"""
+        import datetime
+
+        message_log = {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'direction': direction,  # 'sent' or 'received'
+            'message_type': message_type,
+            'from': sender if direction == 'received' else 'Position Monitor',
+            'to': recipient if direction == 'sent' else 'Position Monitor',
+            'details': details or {}
+        }
+
+        self.message_history.append(message_log)
+
+        # Keep only last N messages
+        if len(self.message_history) > self.max_messages:
+            self.message_history = self.message_history[-self.max_messages:]
+
+        # Log to console
+        arrow = '→' if direction == 'sent' else '←'
+        logger.info(f"💬 {arrow} {message_type}: {sender or recipient}")
 
     def _setup_handlers(self):
         """Setup all message handlers"""
@@ -180,6 +371,13 @@ class PositionMonitorAgent:
                                     user_id = pos['user']['id']
                                     position_id = pos['id']
 
+                                    # Skip positions with negative health factors (already liquidated)
+                                    health_factor = float(pos['healthFactor'])
+                                    if health_factor < 0:
+                                        logger.debug(
+                                            f"Skipping liquidated position {position_id} (HF: {health_factor})")
+                                        continue
+
                                     # Get token addresses and map to symbols
                                     collateral_asset = pos['collateralAsset']
                                     debt_asset = pos['debtAsset']
@@ -188,6 +386,12 @@ class PositionMonitorAgent:
                                     collateral_token = get_token_symbol(
                                         collateral_asset)
                                     debt_token = get_token_symbol(debt_asset)
+
+                                    # Skip positions with unknown tokens
+                                    if collateral_token == 'UNKNOWN' or debt_token == 'UNKNOWN':
+                                        logger.debug(
+                                            f"Skipping position {position_id} with unknown tokens")
+                                        continue
 
                                     # Parse position data
                                     self.positions[user_id] = {
@@ -200,7 +404,7 @@ class PositionMonitorAgent:
                                         'debt_asset': debt_asset,
                                         'debt_token': debt_token,
                                         'debt_amount': float(pos['debtAmount']),
-                                        'health_factor': float(pos['healthFactor']),
+                                        'health_factor': health_factor,
                                         'last_updated': pos['updatedAt']
                                     }
                                     loaded_count += 1
@@ -242,6 +446,17 @@ class PositionMonitorAgent:
         @self.agent.on_message(model=DemoMarketCrash)
         async def handle_crash_start(ctx: Context, sender: str, msg: DemoMarketCrash):
             """Handle demo crash initiation"""
+            self._log_message(
+                direction='received',
+                message_type='DemoMarketCrash',
+                sender=sender[:16] + '...',
+                details={
+                    'initial_price': f"${msg.initial_eth_price:.2f}",
+                    'target_price': f"${msg.target_eth_price:.2f}",
+                    'duration': f"{msg.crash_duration_seconds}s"
+                }
+            )
+
             logger.warning("🚨 DEMO CRASH INITIATED!")
             logger.info(f"   Initial: ${msg.initial_eth_price:.2f}")
             logger.info(f"   Target: ${msg.target_eth_price:.2f}")
@@ -258,6 +473,15 @@ class PositionMonitorAgent:
         @self.agent.on_message(model=DemoPriceUpdate)
         async def handle_price_update(ctx: Context, sender: str, msg: DemoPriceUpdate):
             """Handle real-time price updates during crash"""
+            self._log_message(
+                direction='received',
+                message_type='DemoPriceUpdate',
+                sender=sender[:16] + '...',
+                details={
+                    'eth_price': f"${msg.current_eth_price:.2f}"
+                }
+            )
+
             if msg.crash_id != self.demo_crash_id:
                 return
 
@@ -314,6 +538,17 @@ class PositionMonitorAgent:
         @self.agent.on_message(model=PresentationTrigger)
         async def handle_presentation_trigger(ctx: Context, sender: str, msg: PresentationTrigger):
             """Handle manual triggers for live presentations - PRESENTATION_MODE only"""
+
+            # Log received message
+            self._log_message(
+                direction='received',
+                message_type='PresentationTrigger',
+                sender=sender[:16] + '...',
+                details={
+                    'trigger_type': msg.trigger_type,
+                    'trigger_id': msg.trigger_id
+                }
+            )
 
             # Security check: Only allow in PRESENTATION_MODE
             if not PRESENTATION_MODE:
@@ -488,6 +723,20 @@ class PositionMonitorAgent:
                 "Yield optimizer address not set, cannot send alert")
             return
 
+        # Check if we've already alerted for this position recently (deduplication)
+        current_time = time.time()
+        last_alert_time = self.alerted_positions.get(user_address, 0)
+
+        if current_time - last_alert_time < self.alert_cooldown:
+            time_since_alert = int(current_time - last_alert_time)
+            cooldown_remaining = int(self.alert_cooldown - time_since_alert)
+            logger.info(
+                f"⏭️  Skipping alert for {user_address[:10]}... (cooldown: {time_since_alert}s / {self.alert_cooldown}s, {cooldown_remaining}s remaining)")
+            return
+
+        # Mark this position as alerted
+        self.alerted_positions[user_address] = current_time
+
         alert = PositionAlert(
             user_address=user_address,
             position_id=position_data['position_id'],
@@ -506,6 +755,20 @@ class PositionMonitorAgent:
         # Send to Yield Optimizer
         # For local testing: agents discover each other via their HTTP endpoints automatically
         await ctx.send(self.YIELD_OPTIMIZER_ADDRESS, alert)
+
+        # Log the message
+        self._log_message(
+            direction='sent',
+            message_type='PositionAlert',
+            recipient='Yield Optimizer',
+            details={
+                'user': user_address[:10] + '...' + user_address[-8:],
+                'health_factor': round(health_factor, 3),
+                'risk_level': risk_level,
+                'collateral': f"${collateral_value:,.2f}",
+                'debt': f"${debt_value:,.2f}"
+            }
+        )
 
         logger.warning(
             f"⚠️  ALERT SENT: Position {user_address[:10]}... | HF: {health_factor:.2f}")

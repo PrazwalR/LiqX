@@ -1,12 +1,11 @@
 """
 LiquidityGuard AI - Price Feed Manager
 
-Fetches real-time price data from multiple sources with fallback mechanisms.
+Fetches real-time price data from CoinGecko API with caching.
 
 Priority:
-1. Chainlink oracles (on-chain, most reliable for production)
-2. CoinGecko API (fallback for development)
-3. Demo mode (mock prices for testing)
+1. CoinGecko API (real-time prices)
+2. Demo mode (mock prices for testing)
 """
 
 import aiohttp
@@ -19,70 +18,26 @@ from loguru import logger
 
 load_dotenv()
 
-# Chainlink Price Feed addresses on Ethereum Mainnet
-CHAINLINK_PRICE_FEEDS = {
-    "ETH": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",  # ETH/USD
-    "WETH": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",  # Same as ETH
-    "WBTC": "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c",  # BTC/USD
-    "USDC": "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6",  # USDC/USD
-    "USDT": "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D",  # USDT/USD
-    "DAI": "0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9",   # DAI/USD
-}
-
-# Chainlink ABI - just the latestRoundData function we need
-CHAINLINK_ABI = [
-    {
-        "inputs": [],
-        "name": "latestRoundData",
-        "outputs": [
-            {"name": "roundId", "type": "uint80"},
-            {"name": "answer", "type": "int256"},
-            {"name": "startedAt", "type": "uint256"},
-            {"name": "updatedAt", "type": "uint256"},
-            {"name": "answeredInRound", "type": "uint80"}
-        ],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "decimals",
-        "outputs": [{"name": "", "type": "uint8"}],
-        "stateMutability": "view",
-        "type": "function"
-    }
-]
-
 
 class PriceFeedManager:
     """
-    Fetches real-time price data from multiple sources
+    Fetches real-time price data from CoinGecko
 
     Supports:
-    - Chainlink oracles (on-chain, production)
-    - CoinGecko API (off-chain, development)
+    - CoinGecko API (off-chain, real-time)
     - Demo mode (mock prices, testing)
     """
 
     def __init__(self):
         self.coingecko_api_key = os.getenv('COINGECKO_API_KEY')
         self.demo_mode = os.getenv('DEMO_MODE', 'false').lower() == 'true'
-        self.use_chainlink = os.getenv(
-            'USE_CHAINLINK', 'false').lower() == 'true'
-        self.rpc_url = os.getenv('ETH_RPC_URL', 'https://eth.llamarpc.com')
 
         self.mock_prices = {}
         self.price_cache = {}
         self.cache_ttl = 60  # Cache for 60 seconds
 
-        # Web3 connection (lazy loaded)
-        self.web3 = None
-
         logger.info("PriceFeedManager initialized")
         logger.info(f"Demo mode: {self.demo_mode}")
-        logger.info(f"Use Chainlink: {self.use_chainlink}")
-        if self.use_chainlink:
-            logger.info(f"RPC URL: {self.rpc_url}")
 
     async def get_token_price(
         self,
@@ -90,15 +45,15 @@ class PriceFeedManager:
         chain: str = "ethereum"
     ) -> Optional[float]:
         """
-        Get current token price in USD
+        Get current token price in USD from CoinGecko
 
         Priority:
         1. Demo mode (if enabled) - instant mock prices
-        2. CoinGecko API - perfect for off-chain analysis
+        2. CoinGecko API - real-time price data
 
         Args:
             token_symbol: Token symbol (ETH, WBTC, SOL)
-            chain: Blockchain name
+            chain: Blockchain name (not used, kept for compatibility)
 
         Returns:
             Price in USD or None if unavailable
@@ -118,7 +73,7 @@ class PriceFeedManager:
                     f"[CACHE] {token_symbol} price: ${cached_price:.2f}")
                 return cached_price
 
-        # Fetch from CoinGecko - perfect for our use case!
+        # Fetch from CoinGecko
         price = await self._fetch_from_coingecko(token_symbol)
         if price:
             self.price_cache[cache_key] = (
@@ -128,30 +83,15 @@ class PriceFeedManager:
         logger.warning(f"Failed to fetch price for {token_symbol}")
         return None
 
-    def _init_web3(self):
-        """Initialize Web3 connection for Chainlink (lazy loaded)"""
-        if self.web3 is None:
-            try:
-                from web3 import Web3
-                self.web3 = Web3(Web3.HTTPProvider(self.rpc_url))
-                if self.web3.is_connected():
-                    logger.info(f"✅ Connected to Ethereum via {self.rpc_url}")
-                else:
-                    logger.error("❌ Failed to connect to Ethereum RPC")
-                    self.use_chainlink = False
-            except Exception as e:
-                logger.error(f"Failed to initialize Web3: {e}")
-                self.use_chainlink = False
-
     async def _fetch_from_coingecko(self, symbol: str) -> Optional[float]:
         """
         Fetch price from CoinGecko API
 
-        Perfect for our use case:
-        - Off-chain analysis (don't need on-chain oracle)
+        Benefits:
+        - Real-time price data
         - Wide token coverage
         - Simple REST API
-        - Real-time enough for liquidation monitoring
+        - Perfect for liquidation monitoring
 
         API Docs: https://www.coingecko.com/en/api/documentation
 

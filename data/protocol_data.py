@@ -30,23 +30,11 @@ class ProtocolDataFetcher:
             'DEFILLAMA_BASE_URL',
             'https://yields.llama.fi'
         )
-        self.demo_mode = os.getenv('DEMO_MODE', 'false').lower() == 'true'
         self.apy_cache = {}
         self.cache_ttl = 300  # Cache for 5 minutes
 
-        # Mock APY data for demo mode
-        self.mock_apys = {
-            "aave_ethereum_eth": 5.2,
-            "aave_ethereum_usdc": 4.8,
-            "compound_ethereum_usdc": 4.5,
-            "compound_ethereum_eth": 6.8,  # Better alternative for ETH on same chain
-            "lido_ethereum_eth": 7.5,      # Liquid staking alternative
-            "kamino_solana_sol": 9.1,
-            "drift_solana_usdc": 8.3,
-        }
-
-        logger.info("ProtocolDataFetcher initialized")
-        logger.info(f"Demo mode: {self.demo_mode}")
+        logger.info("📡 ProtocolDataFetcher initialized")
+        logger.info("   - All protocols: Real DeFi Llama API")
 
     async def get_protocol_apy(
         self,
@@ -67,20 +55,14 @@ class ProtocolDataFetcher:
         """
         key = f"{protocol}_{chain}_{token}".lower()
 
-        # Check demo mode
-        if self.demo_mode and key in self.mock_apys:
-            apy = self.mock_apys[key]
-            logger.debug(f"[DEMO] {key} APY: {apy:.2f}%")
-            return apy
-
-        # Check cache
+        # Check cache for real data
         if key in self.apy_cache:
             cached_apy, timestamp = self.apy_cache[key]
             if asyncio.get_event_loop().time() - timestamp < self.cache_ttl:
                 logger.debug(f"[CACHE] {key} APY: {cached_apy:.2f}%")
                 return cached_apy
 
-        # Try DeFi Llama
+        # Fetch real data from DeFi Llama
         apy = await self._fetch_from_defillama(protocol, chain, token)
         if apy:
             self.apy_cache[key] = (apy, asyncio.get_event_loop().time())
@@ -88,6 +70,7 @@ class ProtocolDataFetcher:
             return apy
 
         logger.warning(f"Failed to fetch APY for {key}")
+        return None
         return None
 
     async def _fetch_from_defillama(
@@ -97,14 +80,14 @@ class ProtocolDataFetcher:
         token: str
     ) -> Optional[float]:
         """
-        Fetch from DeFi Llama yields API
+        Fetch from DeFi Llama yields API with flexible matching
 
         API Docs: https://defillama.com/docs/api
         """
         url = f"{self.defillama_base_url}/pools"
 
         try:
-            # Create SSL context that doesn't verify certificates (for development)
+            # Create SSL context
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
@@ -116,17 +99,52 @@ class ProtocolDataFetcher:
                         data = await response.json()
                         pools = data.get('data', [])
 
-                        # Find matching pool
+                        # Normalize search terms
+                        protocol_search = protocol.lower().replace(
+                            '-v3', '').replace('-v2', '').replace('-', '')
+                        chain_search = chain.lower().split(
+                            '-')[0]  # ethereum-sepolia -> ethereum
+                        token_search = token.upper()
+
+                        # Map token variations
+                        if token_search in ['WETH', 'ETH']:
+                            token_variations = ['WETH', 'ETH', 'STETH']
+                        else:
+                            token_variations = [token_search]
+
+                        best_match = None
+                        best_apy = 0
+
+                        # Flexible matching
                         for pool in pools:
                             pool_project = pool.get('project', '').lower()
                             pool_chain = pool.get('chain', '').lower()
                             pool_symbol = pool.get('symbol', '').upper()
+                            apy = pool.get('apy', 0)
 
-                            if (pool_project == protocol.lower() and
-                                pool_chain == chain.lower() and
-                                    token.upper() in pool_symbol):
-                                apy = pool.get('apy', 0)
-                                return float(apy) if apy else None
+                            # Protocol matching: exact, startswith, or contains
+                            protocol_match = (
+                                pool_project == protocol_search or
+                                pool_project.startswith(protocol_search) or
+                                protocol_search in pool_project
+                            )
+
+                            # Chain matching
+                            chain_match = chain_search in pool_chain
+
+                            # Token matching (any variation)
+                            token_match = any(
+                                tv in pool_symbol for tv in token_variations)
+
+                            if protocol_match and chain_match and token_match:
+                                if apy > best_apy:
+                                    best_match = pool
+                                    best_apy = apy
+                                    logger.debug(
+                                        f"Matched: {pool_project} on {pool_chain} - {pool_symbol} - {apy:.2f}%")
+
+                        if best_match:
+                            return float(best_apy)
                     else:
                         logger.error(
                             f"DeFi Llama API error: {response.status}")
@@ -187,20 +205,30 @@ class ProtocolDataFetcher:
         Find the protocol with the best yield for a token
 
         Args:
-            token: Token symbol
+            token: Token symbol (WETH, ETH, USDC, etc.)
             exclude_protocols: List of protocols to exclude
             allow_cross_chain: Whether to include cross-chain opportunities
 
         Returns:
             {
-                "protocol": "kamino",
-                "chain": "solana",
-                "token": "SOL",
-                "apy": 9.1
+                "protocol": "aave",
+                "chain": "ethereum",
+                "token": "ETH",
+                "apy": 6.52
             }
         """
         exclude_protocols = exclude_protocols or []
+
+        # Normalize exclude list (remove -v3, -v2 suffixes)
+        exclude_normalized = [p.replace(
+            '-v3', '').replace('-v2', '').replace('-', '').lower() for p in exclude_protocols]
+
         all_yields = await self.get_all_yields()
+
+        # Handle WETH/ETH equivalence
+        token_variations = [token.upper()]
+        if token.upper() in ['WETH', 'ETH']:
+            token_variations = ['WETH', 'ETH']
 
         best_yield = None
         best_apy = 0
@@ -210,17 +238,24 @@ class ProtocolDataFetcher:
             if len(parts) >= 3:
                 protocol, chain, token_symbol = parts[0], parts[1], parts[2]
 
-                # Case-insensitive token comparison
-                if (token_symbol.lower() == token.lower() and
-                    protocol not in exclude_protocols and
-                        apy > best_apy):
+                # Check if protocol is excluded (normalized comparison)
+                protocol_normalized = protocol.replace(
+                    '-v3', '').replace('-v2', '').replace('-', '').lower()
+                if protocol_normalized in exclude_normalized:
+                    continue
+
+                # Case-insensitive token comparison with variations
+                token_match = token_symbol.upper(
+                ) in [tv.upper() for tv in token_variations]
+
+                if token_match and apy > best_apy:
                     best_apy = apy
                     best_yield = {
                         "protocol": protocol,
                         "chain": chain,
                         "token": token_symbol.upper(),
                         "apy": apy,
-                        "cross_chain": False  # Will be determined by caller
+                        "cross_chain": False
                     }
 
         if best_yield:
@@ -228,6 +263,9 @@ class ProtocolDataFetcher:
                 f"Best yield for {token}: {best_yield['protocol']} "
                 f"({best_yield['chain']}) - {best_yield['apy']:.2f}% APY"
             )
+        else:
+            logger.warning(
+                f"No yields found for {token} (tried: {token_variations})")
 
         return best_yield
 

@@ -26,6 +26,9 @@ import time
 import uuid
 import aiohttp
 import ssl
+import threading
+import json
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from loguru import logger
@@ -47,7 +50,7 @@ AGENT_PORT = int(os.getenv('SWAP_OPTIMIZER_PORT', '8002'))
 EXECUTOR_ADDRESS = None  # Will be set after registration
 
 # Deployment mode
-DEPLOY_MODE = os.getenv('DEPLOY_MODE', 'local')  # 'local' or 'almanac'
+DEPLOY_MODE = 'local'  # Hardcoded: Almanac not needed for HTTP-based presentation
 
 # 1inch API Configuration
 ONEINCH_API_KEY = os.getenv('ONEINCH_API_KEY')
@@ -81,6 +84,110 @@ PRESENTATION_MOCK_FUSION = os.getenv(
 
 
 # ═══════════════════════════════════════════════════════
+# HTTP API SERVER (for frontend to fetch 1inch responses)
+# ═══════════════════════════════════════════════════════
+
+# Global reference to agent instance for HTTP handler
+_agent_instance = None
+
+
+class OneInchAPIHandler(BaseHTTPRequestHandler):
+    """HTTP handler to serve 1inch API responses to frontend"""
+
+    def do_GET(self):
+        """Handle GET requests"""
+        global _agent_instance
+
+        if self.path == '/oneinch-responses':
+            # Return latest 1inch API responses
+            if _agent_instance:
+                responses = _agent_instance.get_latest_oneinch_responses(
+                    limit=10)
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'responses': responses,
+                    'timestamp': int(time.time() * 1000)
+                }).encode())
+            else:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'error': 'Agent not initialized',
+                    'timestamp': int(time.time() * 1000)
+                }).encode())
+
+        elif self.path == '/messages':
+            # Return message history
+            if _agent_instance:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'messages': _agent_instance.message_history[-50:],
+                    'total': len(_agent_instance.message_history)
+                }).encode())
+            else:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'messages': [],
+                    'total': 0
+                }).encode())
+
+        elif self.path == '/health':
+            # Health check
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            self.wfile.write(json.dumps({
+                'status': 'ok',
+                'timestamp': int(time.time() * 1000)
+            }).encode())
+
+        else:
+            self.send_response(404)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            self.wfile.write(json.dumps({
+                'error': 'Not found'
+            }).encode())
+
+    def log_message(self, format, *args):
+        """Suppress default HTTP server logs"""
+        pass
+
+
+def start_http_server(port: int = 8102):
+    """Start HTTP server in background thread"""
+    server = HTTPServer(('0.0.0.0', port), OneInchAPIHandler)
+    logger.info(f"🌐 HTTP API server listening on port {port}")
+    logger.info(
+        f"   GET http://localhost:{port}/oneinch-responses - Latest 1inch API responses")
+    server.serve_forever()
+
+
+# ═══════════════════════════════════════════════════════
 # SWAP OPTIMIZER AGENT
 # ═══════════════════════════════════════════════════════
 
@@ -88,7 +195,7 @@ class SwapOptimizerAgent:
     """Swap Optimizer Agent Implementation"""
 
     # Executor Address (updated from config/agent_addresses.json)
-    EXECUTOR_ADDRESS = "agent1qtk56cc7z5499vuh43n5c4kzhve5u0khn7awcwsjn9eqfe3u2gsv7fwrrqq"
+    EXECUTOR_ADDRESS = "agent1qvtks8445uqevmzx7lvyl9w0vx09f2ghu3cnqzpppv89cjrwv9wgx50pu73"
 
     def __init__(self):
         # Initialize agent based on deployment mode
@@ -120,12 +227,43 @@ class SwapOptimizerAgent:
         self.routes_generated = 0
         self.errors_count = 0
 
+        # Store latest 1inch API responses for frontend display
+        self.latest_oneinch_responses = []  # Last 10 responses
+        self.max_stored_responses = 10
+
+        # Message history for frontend activity feed
+        self.message_history = []
+        self.max_messages = 100
+
         # Setup handlers
         self._setup_handlers()
 
         logger.info(f"Swap Optimizer Agent initialized")
         logger.info(f"Agent address: {self.agent.address}")
         logger.info(f"Port: {AGENT_PORT}")
+
+    def _log_message(self, direction: str, message_type: str, recipient: str = None, sender: str = None, details: dict = None):
+        """Log agent communication message"""
+        import datetime
+
+        message_log = {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'direction': direction,  # 'sent' or 'received'
+            'message_type': message_type,
+            'from': sender if direction == 'received' else 'Swap Optimizer',
+            'to': recipient if direction == 'sent' else 'Swap Optimizer',
+            'details': details or {}
+        }
+
+        self.message_history.append(message_log)
+
+        # Keep only last N messages
+        if len(self.message_history) > self.max_messages:
+            self.message_history = self.message_history[-self.max_messages:]
+
+        # Log to console
+        arrow = '→' if direction == 'sent' else '←'
+        logger.info(f"💬 {arrow} {message_type}: {sender or recipient}")
 
     def _setup_handlers(self):
         """Setup all message handlers"""
@@ -141,6 +279,17 @@ class SwapOptimizerAgent:
         @self.agent.on_message(model=RebalanceStrategy)
         async def handle_rebalance_strategy(ctx: Context, sender: str, msg: RebalanceStrategy):
             """Handle rebalancing strategy from Yield Optimizer"""
+
+            # Log received message
+            self._log_message('received', 'RebalanceStrategy', sender=sender, details={
+                'strategy_id': msg.strategy_id[:8],
+                'user': msg.user_address[:10] + '...',
+                'from_protocol': msg.source_protocol,
+                'to_protocol': msg.target_protocol,
+                'amount_usd': f'${msg.amount_to_move:.2f}',
+                'apy_improvement': f'+{msg.expected_apy_improvement:.2f}%'
+            })
+
             logger.warning("⚠️  REBALANCE STRATEGY RECEIVED")
             logger.info(f"   Strategy ID: {msg.strategy_id}")
             logger.info(f"   User: {msg.user_address[:10]}...")
@@ -166,6 +315,16 @@ class SwapOptimizerAgent:
                 self.routes_generated += 1
                 logger.success(
                     f"✅ Swap route generated: {swap_route.route_id}")
+
+                # Log sent message
+                self._log_message('sent', 'SwapRoute', recipient='Cross-Chain Executor', details={
+                    'route_id': swap_route.route_id[:8] + '...',
+                    'from': msg.source_protocol,
+                    'to': msg.target_protocol,
+                    'amount_usd': f'${msg.amount_to_move:.2f}',
+                    'gasless': True,
+                    'mev_protected': True
+                })
 
                 # Send to Executor
                 await ctx.send(self.EXECUTOR_ADDRESS, swap_route)
@@ -267,6 +426,14 @@ class SwapOptimizerAgent:
             logger.warning("1inch API key not configured, using demo mode")
             return await self._generate_demo_route(from_token, to_token, amount_usd)
 
+        # Validate and sanitize user address for 1inch API
+        # If address is truncated/invalid (from demo data), use a valid demo address
+        if not user_address or len(user_address) != 42 or not user_address.startswith('0x'):
+            # Use a valid Ethereum address for demo (Vitalik's address for presentation)
+            user_address = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045'
+            logger.info(
+                f"📍 Using demo address for 1inch API: {user_address[:10]}...")
+
         # Get token addresses (simplified - would need token registry)
         token_addresses = {
             'eth': '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',  # Native ETH
@@ -326,6 +493,20 @@ class SwapOptimizerAgent:
                         logger.info(f"   Preset: {recommended_preset}")
                         logger.info(f"   Gasless: YES (resolvers pay gas)")
 
+                        # Store the full API response for frontend display
+                        self._store_oneinch_response({
+                            'timestamp': int(time.time() * 1000),
+                            'request': {
+                                'from_token': from_token,
+                                'to_token': to_token,
+                                'amount_usd': amount_usd,
+                                'chain_id': chain_id,
+                                'user_address': user_address
+                            },
+                            'response': quote_data,
+                            'status': 'success'
+                        })
+
                         # Create SwapRoute with Fusion+ data
                         route = SwapRoute(
                             route_id=str(uuid.uuid4()),
@@ -347,6 +528,22 @@ class SwapOptimizerAgent:
                         logger.error(f"Fusion+ API error: {response.status}")
                         error_text = await response.text()
                         logger.debug(f"Error details: {error_text}")
+
+                        # Store the error response
+                        self._store_oneinch_response({
+                            'timestamp': int(time.time() * 1000),
+                            'request': {
+                                'from_token': from_token,
+                                'to_token': to_token,
+                                'amount_usd': amount_usd,
+                                'chain_id': chain_id
+                            },
+                            'response': {
+                                'error': error_text,
+                                'status_code': response.status
+                            },
+                            'status': 'error'
+                        })
 
                         # Fallback to demo mode
                         logger.warning(
@@ -433,14 +630,39 @@ class SwapOptimizerAgent:
         logger.info(f"   ✅ Better Pricing: YES (Dutch auction)")
         return route
 
+    def _store_oneinch_response(self, response_data: dict):
+        """Store 1inch API response for frontend display"""
+        self.latest_oneinch_responses.append(response_data)
+
+        # Keep only the latest N responses
+        if len(self.latest_oneinch_responses) > self.max_stored_responses:
+            self.latest_oneinch_responses = self.latest_oneinch_responses[-self.max_stored_responses:]
+
+        logger.debug(
+            f"Stored 1inch response. Total stored: {len(self.latest_oneinch_responses)}")
+
+    def get_latest_oneinch_responses(self, limit: int = 10) -> list:
+        """Get latest 1inch API responses for frontend"""
+        return self.latest_oneinch_responses[-limit:]
+
     def run(self):
         """Run the agent"""
+        global _agent_instance
+        _agent_instance = self
+
+        # Start HTTP server in background thread for frontend to fetch 1inch responses
+        http_port = 8102  # Different from agent port (8002)
+        http_thread = threading.Thread(
+            target=start_http_server, args=(http_port,), daemon=True)
+        http_thread.start()
+
         logger.info("=" * 60)
         logger.info("Swap Optimizer Agent - LiquidityGuard AI")
         logger.info("🔥 FUSION+ MODE ENABLED 🔥")
         logger.info("=" * 60)
         logger.info(f"Agent Address: {self.agent.address}")
-        logger.info(f"Port: {AGENT_PORT}")
+        logger.info(f"Agent Port: {AGENT_PORT}")
+        logger.info(f"HTTP API Port: {http_port}")
         logger.info(
             f"1inch Fusion+: {'Configured' if ONEINCH_API_KEY and ONEINCH_API_KEY != 'your_1inch_api_key_here' else 'Demo Mode'}")
         logger.info(f"Benefits:")

@@ -42,24 +42,21 @@
 ;;; ─────────────────────────────────────────────────────────────
 
 ;; Calculate liquidation probability (0-100%)
+;; Simplified without let binding and using if instead of min
 (: liquidation-probability (-> Number Number Number))
 (= (liquidation-probability $hf $volatility)
-   (let (
-     ;; Base probability from health factor
-     ($base-prob (if (< $hf 1.0) 
-                     100 
-                     (if (< $hf 1.3) 
-                         80 
-                         (if (< $hf 1.5) 
-                             40 
-                             (if (< $hf 1.8) 
-                                 15 
-                                 5)))))
-     ;; Volatility multiplier (higher vol = higher risk)
-     ($vol-multiplier (+ 1.0 (* $volatility 0.01)))
-   )
-   ;; Final probability (capped at 100)
-   (min 100 (* $base-prob $vol-multiplier))))
+   (if (> (* (if (< $hf 1.0) 100
+                 (if (< $hf 1.3) 80
+                     (if (< $hf 1.5) 40
+                         (if (< $hf 1.8) 15 5))))
+             (+ 1.0 (* $volatility 0.01)))
+          100)
+       100
+       (* (if (< $hf 1.0) 100
+              (if (< $hf 1.3) 80
+                  (if (< $hf 1.5) 40
+                      (if (< $hf 1.8) 15 5))))
+          (+ 1.0 (* $volatility 0.01)))))
 
 ;;; ─────────────────────────────────────────────────────────────
 ;;; TIME TO LIQUIDATION ESTIMATION
@@ -84,24 +81,19 @@
 ;;; ─────────────────────────────────────────────────────────────
 
 ;; Calculate urgency score (0-10)
-(: urgency-score (-> Number Number Number))
+;; Simplified without let binding
+(: urgency-score (-> Number Number Number Number))
 (= (urgency-score $hf $liquidation-prob $time-to-liq)
-   (let (
-     ;; Health factor component (0-4 points)
-     ($hf-score (if (< $hf 1.3) 4
-                    (if (< $hf 1.5) 3
-                        (if (< $hf 1.8) 2
-                            (if (< $hf 2.0) 1 0)))))
-     ;; Probability component (0-3 points)
-     ($prob-score (if (> $liquidation-prob 70) 3
-                      (if (> $liquidation-prob 40) 2
-                          (if (> $liquidation-prob 15) 1 0))))
-     ;; Time component (0-3 points)
-     ($time-score (if (< $time-to-liq 600) 3        ; < 10 min
-                      (if (< $time-to-liq 3600) 2    ; < 1 hour
-                          (if (< $time-to-liq 86400) 1 0))))  ; < 1 day
-   )
-   (+ $hf-score $prob-score $time-score)))
+   (+ (+ (if (< $hf 1.3) 4
+            (if (< $hf 1.5) 3
+                (if (< $hf 1.8) 2
+                    (if (< $hf 2.0) 1 0))))
+         (if (> $liquidation-prob 70) 3
+             (if (> $liquidation-prob 40) 2
+                 (if (> $liquidation-prob 15) 1 0))))
+      (if (< $time-to-liq 600) 3
+          (if (< $time-to-liq 3600) 2
+              (if (< $time-to-liq 86400) 1 0)))))
 
 ;;; ─────────────────────────────────────────────────────────────
 ;;; POSITION ANALYSIS
@@ -128,44 +120,38 @@
 ;; Match position to risk scenario
 (: match-risk-scenario (-> Number Number String))
 (= (match-risk-scenario $hf $collateral-usd)
-   (match (list $hf $collateral-usd)
-     ;; Critical scenarios
-     ((list $h $c) (if (and (< $h 1.2) (> $c 50000))
-                       "CRITICAL-LARGE-POSITION"
-                       (if (< $h 1.2)
-                           "CRITICAL-SMALL-POSITION"
-                           ;; High risk scenarios
-                           (if (and (< $h 1.5) (> $c 100000))
-                               "HIGH-RISK-WHALE"
-                               (if (< $h 1.5)
-                                   "HIGH-RISK-RETAIL"
-                                   ;; Moderate scenarios
-                                   (if (< $h 1.8)
-                                       "MODERATE-RISK"
-                                       "LOW-RISK"))))))))
+   (if (and (< $hf 1.2) (> $collateral-usd 50000))
+       CRITICAL-LARGE-POSITION
+       (if (< $hf 1.2)
+           CRITICAL-SMALL-POSITION
+           (if (and (< $hf 1.5) (> $collateral-usd 100000))
+               HIGH-RISK-WHALE
+               (if (< $hf 1.5)
+                   HIGH-RISK-RETAIL
+                   (if (< $hf 1.8)
+                       MODERATE-RISK
+                       LOW-RISK))))))
 
 ;;; ─────────────────────────────────────────────────────────────
 ;;; RECOMMENDED ACTIONS
 ;;; ─────────────────────────────────────────────────────────────
 
 ;; Generate action recommendation based on risk
-(: recommend-action (-> String (List Symbol)))
-(= (recommend-action $risk-scenario)
-   (match $risk-scenario
-     ("CRITICAL-LARGE-POSITION" 
-      (list emergency-rebalance immediate-notification whale-protocol))
-     ("CRITICAL-SMALL-POSITION"
-      (list urgent-rebalance user-notification standard-protocol))
-     ("HIGH-RISK-WHALE"
-      (list proactive-rebalance whale-protocol multi-chain-optimization))
-     ("HIGH-RISK-RETAIL"
-      (list scheduled-rebalance standard-protocol single-chain-optimization))
-     ("MODERATE-RISK"
-      (list monitor-closely opportunistic-rebalance))
-     ("LOW-RISK"
-      (list routine-monitoring))
-     ($other
-      (list unknown-scenario manual-review))))
+(: recommend-action (-> Symbol (List Symbol)))
+(= (recommend-action CRITICAL-LARGE-POSITION)
+   (cons emergency-rebalance (cons immediate-notification (cons whale-protocol empty))))
+(= (recommend-action CRITICAL-SMALL-POSITION)
+   (cons urgent-rebalance (cons user-notification (cons standard-protocol empty))))
+(= (recommend-action HIGH-RISK-WHALE)
+   (cons proactive-rebalance (cons whale-protocol (cons multi-chain-optimization empty))))
+(= (recommend-action HIGH-RISK-RETAIL)
+   (cons scheduled-rebalance (cons standard-protocol (cons single-chain-optimization empty))))
+(= (recommend-action MODERATE-RISK)
+   (cons monitor-closely (cons opportunistic-rebalance empty)))
+(= (recommend-action LOW-RISK)
+   (cons routine-monitoring empty))
+(= (recommend-action $other)
+   (cons unknown-scenario (cons manual-review empty)))
 
 ;;; ─────────────────────────────────────────────────────────────
 ;;; MARKET CONDITION ASSESSMENT

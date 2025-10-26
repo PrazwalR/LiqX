@@ -1,11 +1,12 @@
-"""Simplified message protocols - uagents compatible"""
+"""Clean message protocols - uagents compatible"""
 from uagents import Model
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
 class PositionAlert(Model):
+    """Position Monitor → Yield Optimizer"""
     user_address: str
-    position_id: str  # Changed to str to support subgraph hash IDs
+    position_id: str
     protocol: str
     chain: str
     health_factor: float
@@ -15,88 +16,69 @@ class PositionAlert(Model):
     debt_token: str
     risk_level: str
     timestamp: int
+    predicted_liquidation_time: Optional[int] = None
 
 
-class RebalanceStep(Model):
-    step: int
-    action: str  # withdraw, swap, bridge, supply
-    token: Optional[str] = None
-    amount: Optional[str] = None
-    from_token: Optional[str] = None
-    to_token: Optional[str] = None
-    from_chain: Optional[str] = None
-    to_chain: Optional[str] = None
-    # Protocol or bridge name (1inch, layerzero, jupiter, etc.)
-    via: Optional[str] = None
-    protocol: Optional[str] = None  # For supply/withdraw actions
-    apy: Optional[float] = None
-
-
-class RebalanceStrategy(Model):
-    strategy_id: str
+class OptimizationStrategy(Model):
+    """Yield Optimizer → Swap Optimizer"""
+    position_id: str
     user_address: str
-    position_id: int
-    source_chain: str
-    target_chain: str
-    source_protocol: str
+    current_protocol: str
+    current_chain: str
     target_protocol: str
-    amount_to_move: float
-    expected_apy_improvement: float
-    execution_method: str  # direct_swap, layerzero_pyusd, etc.
+    target_chain: str
+    collateral_token: str
+    debt_token: str
+    collateral_amount: float
+    debt_amount: float
+    current_apy: float
+    target_apy: float
     estimated_gas_cost: float
-    estimated_time: int  # seconds
-    priority: str  # emergency, high, normal
-    reason: str
-    steps: Optional[List[dict]] = None  # Serialized RebalanceStep objects
+    timestamp: int
 
 
-class SwapRoute(Model):
-    route_id: str
-    from_token: str
-    to_token: str
-    amount: float
-    transaction_data: str  # JSON string with route details, Fusion+ data, etc.
+class ExecutionPlan(Model):
+    """Swap Optimizer → Cross-Chain Executor"""
+    position_id: str
+    user_address: str
+    source_protocol: str
+    source_chain: str
+    target_protocol: str
+    target_chain: str
+    steps: List[Dict]  # List of execution steps
+    total_gas_cost: float
+    estimated_completion_time: int  # seconds
+    timestamp: int
 
 
 class ExecutionResult(Model):
-    execution_id: str
-    status: str
-
-
-class DemoMarketCrash(Model):
-    crash_id: str
-    target_price_drop_percent: float
-    duration_seconds: int
-
-
-class DemoPriceUpdate(Model):
-    crash_id: str
-    token: str
-    new_price: float
+    """Cross-Chain Executor → Position Monitor"""
+    position_id: str
+    success: bool
+    tx_hashes: List[str]
+    message: str
+    actual_gas_cost: float
+    timestamp: int
 
 
 class HealthCheckRequest(Model):
-    agent_name: str
+    """Health check request"""
     timestamp: int
 
 
 class HealthCheckResponse(Model):
+    """Health check response"""
     agent_name: str
     status: str
-    uptime: float
-    messages_processed: int
     timestamp: int
+    positions_monitored: Optional[int] = None
 
 
 class PresentationTrigger(Model):
-    """Manual trigger for live presentations - only works in PRESENTATION_MODE"""
-    trigger_id: str
-    trigger_type: str  # "market_crash", "price_drop", "alert_position", "force_rebalance"
-    secret: str  # Must match PRESENTATION_TRIGGER_SECRET in .env
-
-    # Optional parameters
-    # Specific position to trigger alert
-    target_position_id: Optional[str] = None
-    eth_price_drop_percent: Optional[float] = None  # For market_crash
-    custom_price: Optional[float] = None  # For price_drop
-    target_token: Optional[str] = None  # For price_drop
+    """Manual trigger for presentations/demos"""
+    event_type: str  # market_crash, flash_crash, gradual_decline, etc.
+    eth_drop: float  # 0.0 to 1.0 (percentage as decimal)
+    duration: int  # seconds
+    volatility: float = 0.0
+    position_id: Optional[str] = None
+    trigger_id: Optional[str] = None

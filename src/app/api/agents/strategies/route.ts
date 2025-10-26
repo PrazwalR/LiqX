@@ -6,7 +6,7 @@
 
 import { NextResponse } from 'next/server';
 
-const YIELD_OPTIMIZER_HTTP_PORT = process.env.YIELD_OPTIMIZER_HTTP_PORT || '8111';
+const YIELD_OPTIMIZER_HTTP_PORT = process.env.YIELD_OPTIMIZER_HTTP_PORT || '8102';
 
 export async function GET() {
   try {

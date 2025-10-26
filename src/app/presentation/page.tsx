@@ -63,9 +63,14 @@ const AGENT_COLORS: Record<string, string> = {
 interface Strategy {
   protocol: string;
   apy: number;
-  riskScore: number;
-  hfImprovement: number;
-  selected: boolean;
+  riskScore?: number;
+  improvement?: number;  // APY improvement
+  selected?: boolean;
+  target_protocol?: string;
+  current_apy?: number;
+  target_apy?: number;
+  estimated_gas?: number;
+  position_id?: string;
 }
 
 export default function EnhancedPresentationPage() {
@@ -365,8 +370,8 @@ export default function EnhancedPresentationPage() {
                         <div className="flex justify-between items-start mb-2">
                           <div className="text-sm text-gray-400">{price.symbol}</div>
                           <div className={`text-xs px-2 py-0.5 rounded font-semibold ${(price.change24h || 0) >= 0
-                              ? 'bg-green-500/20 text-green-400'
-                              : 'bg-red-500/20 text-red-400'
+                            ? 'bg-green-500/20 text-green-400'
+                            : 'bg-red-500/20 text-red-400'
                             }`}>
                             {(price.change24h || 0) >= 0 ? '↗' : '↘'} {Math.abs(price.change24h || 0).toFixed(2)}%
                           </div>
@@ -398,8 +403,8 @@ export default function EnhancedPresentationPage() {
                       <span className="text-gray-500">Updates every 3s</span>
                       {priceHistory.length > 1 && (
                         <span className={`font-semibold ${priceHistory[priceHistory.length - 1].price >= priceHistory[0].price
-                            ? 'text-green-400'
-                            : 'text-red-400'
+                          ? 'text-green-400'
+                          : 'text-red-400'
                           }`}>
                           {priceHistory[priceHistory.length - 1].price >= priceHistory[0].price ? '↗' : '↘'}
                           {' '}
@@ -488,8 +493,8 @@ export default function EnhancedPresentationPage() {
                       onClick={() => handlePositionSelect(position.id)}
                       disabled={isProcessing}
                       className={`p-4 rounded-lg text-left transition-all ${selectedPosition === position.id
-                          ? 'bg-blue-500/20 border-2 border-blue-500'
-                          : 'bg-white/5 hover:bg-white/10 border-2 border-transparent'
+                        ? 'bg-blue-500/20 border-2 border-blue-500'
+                        : 'bg-white/5 hover:bg-white/10 border-2 border-transparent'
                         } ${isProcessing ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
                     >
                       <div className="flex justify-between items-start">
@@ -540,37 +545,86 @@ export default function EnhancedPresentationPage() {
                       <tr className="border-b border-white/10 text-gray-400 text-sm">
                         <th className="text-left p-3">Protocol</th>
                         <th className="text-right p-3">APY</th>
-                        <th className="text-right p-3">Risk Score</th>
+                        <th className="text-right p-3">MeTTa Score</th>
                         <th className="text-right p-3">HF Improvement</th>
                         <th className="text-right p-3">Status</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {strategies.map((strategy, idx) => (
-                        <tr
-                          key={idx}
-                          className={`border-b border-white/5 ${strategy.selected ? 'bg-green-500/10' : ''
-                            }`}
-                        >
-                          <td className="p-3 text-white font-semibold">{strategy.protocol}</td>
-                          <td className="text-right p-3 text-green-400 font-semibold">
-                            {strategy.apy}%
-                          </td>
-                          <td className="text-right p-3 text-white">
-                            {strategy.riskScore}/10
-                          </td>
-                          <td className="text-right p-3 text-blue-400 font-semibold">
-                            +{strategy.hfImprovement.toFixed(2)}
-                          </td>
-                          <td className="text-right p-3">
-                            {strategy.selected && (
-                              <span className="text-green-400 text-sm font-semibold">
-                                ✅ SELECTED
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
+                      {strategies.map((strategy, idx) => {
+                        // Calculate values from strategy data
+                        const protocol = strategy.target_protocol || strategy.protocol || 'Unknown';
+                        const targetApy = strategy.target_apy || strategy.apy || 0;
+                        const currentApy = strategy.current_apy || 5.0;
+                        const apyImprovement = targetApy - currentApy;
+                        const mettaScore = (strategy as any).metta_score || (strategy as any).score || 0;
+
+                        return (
+                          <tr
+                            key={idx}
+                            className={`border-b border-white/5 hover:bg-white/5 transition-colors ${strategy.selected ? 'bg-green-500/10' : ''
+                              }`}
+                          >
+                            <td className="p-3">
+                              <div className="flex items-center gap-2">
+                                <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center">
+                                  <span className="text-purple-400 text-xs font-bold">
+                                    {protocol.charAt(0).toUpperCase()}
+                                  </span>
+                                </div>
+                                <div>
+                                  <div className="text-white font-semibold">{protocol}</div>
+                                  <div className="text-xs text-gray-400">
+                                    {(strategy as any).chain || 'multi-chain'}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="text-right p-3">
+                              <div className="text-green-400 font-bold text-lg">
+                                {targetApy.toFixed(2)}%
+                              </div>
+                              <div className="text-xs text-gray-400">
+                                from {currentApy.toFixed(2)}%
+                              </div>
+                            </td>
+                            <td className="text-right p-3">
+                              {mettaScore > 0 ? (
+                                <div className="inline-flex flex-col items-end">
+                                  <div className={`text-lg font-bold ${mettaScore >= 80 ? 'text-green-400' :
+                                      mettaScore >= 60 ? 'text-yellow-400' : 'text-red-400'
+                                    }`}>
+                                    {mettaScore}/100
+                                  </div>
+                                  <div className="text-xs text-gray-400">
+                                    {mettaScore >= 80 ? 'Excellent' : mettaScore >= 60 ? 'Good' : 'Fair'}
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-gray-500 text-sm">Calculating...</span>
+                              )}
+                            </td>
+                            <td className="text-right p-3">
+                              <div className="inline-flex items-center gap-1 bg-blue-500/10 px-3 py-1 rounded-full">
+                                <TrendingUp className="w-4 h-4 text-blue-400" />
+                                <span className="text-blue-400 font-bold">
+                                  +{apyImprovement.toFixed(2)}%
+                                </span>
+                              </div>
+                            </td>
+                            <td className="text-right p-3">
+                              {strategy.selected ? (
+                                <span className="inline-flex items-center gap-1 bg-green-500/20 text-green-400 px-3 py-1 rounded-full text-sm font-semibold">
+                                  <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                                  SELECTED
+                                </span>
+                              ) : (
+                                <span className="text-gray-500 text-sm">Available</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -714,8 +768,8 @@ export default function EnhancedPresentationPage() {
                   onClick={handleTrigger}
                   disabled={!selectedPosition}
                   className={`w-full py-4 text-lg font-bold rounded-xl transition-all duration-300 flex items-center justify-center gap-2 ${selectedPosition
-                      ? 'bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white shadow-lg hover:shadow-blue-500/50 hover:scale-105'
-                      : 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                    ? 'bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white shadow-lg hover:shadow-blue-500/50 hover:scale-105'
+                    : 'bg-gray-700 text-gray-400 cursor-not-allowed'
                     }`}
                 >
                   <TrendingDown className="w-5 h-5" />
@@ -739,9 +793,15 @@ export default function EnhancedPresentationPage() {
 
               <div className="space-y-2 max-h-[600px] overflow-y-auto">
                 {agentMessages?.messages && agentMessages.messages.length > 0 ? (
-                  agentMessages.messages.map((msg, index) => {
+                  // Show only last 15 messages (reversed for chronological order, newest at top)
+                  agentMessages.messages.slice(-15).reverse().map((msg, index) => {
                     const isReceived = msg.direction === 'received';
                     const agentName = isReceived ? msg.from : msg.from;
+                    
+                    // Extract sender/receiver from message (agents use different field names)
+                    const sender = msg.from || (msg as any).agent || 'unknown';
+                    const receiver = msg.to || (isReceived ? 'this_agent' : (msg as any).address) || 'unknown';
+                    const messageType = msg.message_type || (msg as any).type || 'Message';
 
                     return (
                       <div
@@ -756,20 +816,37 @@ export default function EnhancedPresentationPage() {
                                 className="w-2 h-2 rounded-full"
                                 style={{ backgroundColor: getAgentColor(agentName) }}
                               />
-                              {msg.direction === 'sent' ? '→' : '←'} {msg.from}
-                              {msg.to && msg.direction === 'sent' && (
-                                <span className="text-gray-400 text-xs">to {msg.to}</span>
-                              )}
+                              <span className="text-blue-400">{sender}</span>
+                              <span className="text-gray-500">→</span>
+                              <span className="text-purple-400">{receiver}</span>
                             </div>
                             <div className="text-sm text-gray-300 mt-1 font-semibold">
-                              {msg.message_type}
+                              {messageType.replace ? messageType.replace(/_/g, ' ') : messageType}
                             </div>
                             {msg.details && typeof msg.details === 'object' && Object.keys(msg.details).length > 0 && (
                               <div className="text-xs mt-2 space-y-1">
                                 {Object.entries(msg.details).map(([key, value]) => {
+                                  // Skip null/undefined values
+                                  if (value === null || value === undefined) return null;
+
                                   // Format the value based on type
                                   let displayValue = String(value);
                                   let valueColor = 'text-gray-300';
+                                  let isBadge = false;
+
+                                  // Handle arrays (like tx_hashes, step_types)
+                                  if (Array.isArray(value)) {
+                                    if (value.length === 0) return null;
+                                    if (key === 'tx_hashes') {
+                                      displayValue = value.map(tx => tx.substring(0, 10) + '...').join(', ');
+                                      valueColor = 'text-cyan-400 font-mono text-[10px]';
+                                    } else if (key === 'step_types') {
+                                      displayValue = value.join(' → ');
+                                      valueColor = 'text-blue-400 font-semibold';
+                                    } else {
+                                      displayValue = value.join(', ');
+                                    }
+                                  }
 
                                   // Handle currency formatting
                                   if (key.includes('collateral') || key.includes('debt') || key.includes('amount_usd')) {
@@ -779,20 +856,53 @@ export default function EnhancedPresentationPage() {
                                     }
                                   }
 
+                                  // Handle gas cost
+                                  if (key.includes('gas_cost') || key === 'total_gas_cost') {
+                                    valueColor = 'text-yellow-400 font-semibold';
+                                  }
+
                                   // Handle health factor with color coding
                                   if (key === 'health_factor' && typeof value === 'number') {
                                     displayValue = value.toFixed(3);
                                     valueColor = value < 1.2 ? 'text-red-400' : value < 1.5 ? 'text-yellow-400' : 'text-green-400';
                                   }
 
-                                  // Handle APY improvement
-                                  if (key === 'apy_improvement') {
-                                    valueColor = 'text-green-400 font-semibold';
+                                  // Handle APY values and improvements
+                                  if (key.includes('apy')) {
+                                    if (key === 'apy_improvement') {
+                                      valueColor = 'text-green-400 font-bold text-sm';
+                                      isBadge = true;
+                                    } else {
+                                      valueColor = 'text-cyan-400 font-semibold';
+                                    }
+                                  }
+
+                                  // Handle success/failure
+                                  if (key === 'success') {
+                                    displayValue = value ? '✅ Success' : '❌ Failed';
+                                    valueColor = value ? 'text-green-400 font-semibold' : 'text-red-400 font-semibold';
+                                  }
+
+                                  // Handle step count
+                                  if (key === 'steps' || key === 'tx_count') {
+                                    valueColor = 'text-blue-400 font-semibold';
+                                    displayValue = `${value} ${key === 'steps' ? 'steps' : 'transactions'}`;
+                                  }
+
+                                  // Handle duration
+                                  if (key.includes('duration')) {
+                                    valueColor = 'text-purple-400';
+                                    if (typeof value === 'number' || !isNaN(Number(value))) {
+                                      const seconds = Number(value);
+                                      displayValue = seconds >= 60 ? `${(seconds / 60).toFixed(1)} min` : `${seconds}s`;
+                                    }
                                   }
 
                                   // Handle risk level
                                   if (key === 'risk_level') {
-                                    valueColor = value === 'critical' ? 'text-red-400' : value === 'high' ? 'text-orange-400' : 'text-yellow-400';
+                                    valueColor = value === 'critical' ? 'text-red-400 font-bold' : value === 'high' ? 'text-orange-400 font-semibold' : 'text-yellow-400';
+                                    displayValue = String(value).toUpperCase();
+                                    isBadge = true;
                                   }
 
                                   // Handle risk score
@@ -800,15 +910,27 @@ export default function EnhancedPresentationPage() {
                                     valueColor = value <= 3 ? 'text-green-400' : value <= 6 ? 'text-yellow-400' : 'text-red-400';
                                   }
 
-                                  // Truncate long addresses
-                                  if (key.includes('user') || key.includes('address')) {
-                                    displayValue = shortenAddress(String(value));
-                                    valueColor = 'text-blue-400';
+                                  // Truncate long addresses and position IDs
+                                  if (key.includes('user') || key.includes('address') || key.includes('position_id')) {
+                                    if (!displayValue.includes('...')) {
+                                      displayValue = shortenAddress(String(value));
+                                    }
+                                    valueColor = 'text-blue-400 font-mono';
                                   }
 
                                   // Handle protocol and chain
                                   if (key.includes('protocol') || key === 'chain') {
-                                    valueColor = 'text-purple-400';
+                                    valueColor = 'text-purple-400 font-semibold';
+                                  }
+
+                                  // Handle tokens
+                                  if (key.includes('token')) {
+                                    valueColor = 'text-cyan-400 font-semibold';
+                                  }
+
+                                  // Handle message text
+                                  if (key === 'message') {
+                                    valueColor = 'text-gray-400 italic';
                                   }
 
                                   // Format key for display
@@ -819,9 +941,15 @@ export default function EnhancedPresentationPage() {
                                     .join(' ');
 
                                   return (
-                                    <div key={key} className="flex justify-between items-center">
+                                    <div key={key} className="flex justify-between items-center gap-2">
                                       <span className="text-gray-500">{displayKey}:</span>
-                                      <span className={valueColor}>{displayValue}</span>
+                                      {isBadge ? (
+                                        <span className={`${valueColor} px-2 py-0.5 rounded-md bg-white/5`}>
+                                          {displayValue}
+                                        </span>
+                                      ) : (
+                                        <span className={valueColor}>{displayValue}</span>
+                                      )}
                                     </div>
                                   );
                                 })}
@@ -909,26 +1037,30 @@ export default function EnhancedPresentationPage() {
               ) : (
                 <div className="space-y-3 max-h-[600px] overflow-y-auto">
                   {oneInchData.responses.map((response, idx) => (
-                    <div key={idx} className="glass-card p-4 fade-in">
+                    <div key={idx} className="glass-card p-4 fade-in hover:border-blue-500/30 transition-all">
                       {/* Header */}
                       <div className="flex justify-between items-start mb-3">
-                        <div>
+                        <div className="flex-1">
                           <div className="font-semibold text-white flex items-center gap-2">
-                            <span className="text-blue-400">
-                              {response.request?.from_token?.toUpperCase() || 'TOKEN'}
+                            <span className="text-blue-400 font-mono">
+                              {response.from_token?.toUpperCase() || 'TOKEN'}
                             </span>
                             <span className="text-gray-500">→</span>
-                            <span className="text-green-400">
-                              {response.request?.to_token?.toUpperCase() || 'TOKEN'}
+                            <span className="text-green-400 font-mono">
+                              {response.to_token?.toUpperCase() || 'TOKEN'}
                             </span>
                           </div>
-                          <div className="text-xs text-gray-400 mt-1">
-                            ${response.request?.amount_usd?.toFixed(2) || '0.00'} • Chain ID: {response.request?.chain_id || 1}
+                          <div className="text-xs text-gray-400 mt-1 flex items-center gap-2">
+                            <span>
+                              {response.input_amount?.toFixed(4) || '0'} {response.from_token?.toUpperCase()}
+                            </span>
+                            <span className="text-gray-600">•</span>
+                            <span className="text-purple-400">{response.route || '1inch'}</span>
                           </div>
                         </div>
                         <div className="text-right">
                           <span
-                            className={`text-xs px-2 py-1 rounded-full ${response.status === 'success'
+                            className={`text-xs px-2 py-1 rounded-full font-semibold ${response.status === 'success'
                                 ? 'bg-green-500/20 text-green-400'
                                 : 'bg-red-500/20 text-red-400'
                               }`}
@@ -942,76 +1074,60 @@ export default function EnhancedPresentationPage() {
                       </div>
 
                       {/* Response Data */}
-                      {response.status === 'success' && response.response && (
+                      {response.status === 'success' && response.output_amount && (
                         <div className="space-y-2">
                           <div className="grid grid-cols-2 gap-3 text-sm">
-                            <div className="bg-white/5 p-2 rounded">
-                              <div className="text-gray-400 text-xs">Output Amount</div>
-                              <div className="text-white font-mono">
-                                {(parseInt(response.response.dstTokenAmount || '0') / 1e18).toFixed(6)}
+                            <div className="bg-blue-500/10 p-3 rounded-lg border border-blue-500/20">
+                              <div className="text-blue-400 text-xs mb-1">Input Amount</div>
+                              <div className="text-white font-mono font-semibold">
+                                {response.input_amount?.toFixed(4) || '0'} {response.from_token?.toUpperCase()}
                               </div>
                             </div>
-                            <div className="bg-white/5 p-2 rounded">
-                              <div className="text-gray-400 text-xs">Preset</div>
-                              <div className="text-white capitalize">
-                                {response.response.recommendedPreset || 'N/A'}
-                              </div>
-                            </div>
-                            <div className="bg-green-500/10 p-2 rounded col-span-2">
-                              <div className="text-green-400 text-xs flex items-center gap-1">
-                                <Zap className="w-3 h-3" />
-                                Gasless Swap (Resolvers pay gas)
+                            <div className="bg-green-500/10 p-3 rounded-lg border border-green-500/20">
+                              <div className="text-green-400 text-xs mb-1">Output Amount</div>
+                              <div className="text-white font-mono font-semibold">
+                                {response.output_amount?.toFixed(4) || '0'} {response.to_token?.toUpperCase()}
                               </div>
                             </div>
                           </div>
+                          {response.estimated_gas && (
+                            <div className="bg-amber-500/10 p-2 rounded-lg border border-amber-500/20">
+                              <div className="text-amber-400 text-xs flex items-center justify-between">
+                                <span className="flex items-center gap-1">
+                                  <Zap className="w-3 h-3" />
+                                  Estimated Gas
+                                </span>
+                                <span className="font-mono font-semibold">
+                                  {response.estimated_gas?.toLocaleString()} gas
+                                </span>
+                              </div>
+                            </div>
+                          )}
 
                           {/* Collapsible JSON */}
                           <details className="mt-3">
                             <summary className="cursor-pointer text-sm text-blue-400 hover:text-blue-300">
-                              View Full API Response
+                              View Raw Response Data
                             </summary>
                             <pre className="mt-2 p-3 bg-gray-900 rounded-lg text-xs text-gray-300 overflow-x-auto">
-                              {JSON.stringify(response.response, null, 2)}
+                              {JSON.stringify(response, null, 2)}
                             </pre>
                           </details>
                         </div>
                       )}
 
                       {/* Error Response */}
-                      {response.status === 'error' && response.response && (
+                      {response.status === 'error' && (
                         <div className="bg-red-500/10 p-3 rounded-lg border border-red-500/20">
                           <div className="text-red-400 text-sm font-semibold mb-1 flex items-center gap-2">
                             <AlertCircle className="w-4 h-4" />
-                            Error: {response.response.status_code || 'Unknown'}
+                            Error: {response.error || 'API request failed'}
                           </div>
-                          <div className="text-gray-300 text-xs mb-2">
-                            {response.response.error || 'API request failed'}
-                          </div>
-                          {response.response.description && (
-                            <div className="text-gray-400 text-xs mb-2">
-                              {response.response.description}
+                          {response.message && (
+                            <div className="text-gray-300 text-xs mb-2">
+                              {response.message}
                             </div>
                           )}
-                          <div className="text-yellow-400 text-xs bg-yellow-500/10 p-2 rounded mt-2 flex items-start gap-2">
-                            <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
-                            <div>
-                              <div className="font-semibold">Expected in Demo Mode</div>
-                              <div className="text-yellow-300/80 mt-0.5">
-                                Truncated addresses are used for privacy in presentation.
-                                The system automatically falls back to demo mode with MeTTa AI reasoning.
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Collapsible Error Details */}
-                          <details className="mt-2">
-                            <summary className="cursor-pointer text-xs text-gray-400 hover:text-gray-300">
-                              View Raw Error Response
-                            </summary>
-                            <pre className="mt-2 p-2 bg-gray-900 rounded text-xs text-gray-400 overflow-x-auto">
-                              {JSON.stringify(response.response, null, 2)}
-                            </pre>
-                          </details>
                         </div>
                       )}
                     </div>

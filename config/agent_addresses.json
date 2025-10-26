@@ -3,5 +3,6 @@
   "yield_optimizer": "agent1q0rtan6yrc6dgv62rlhtj2fn5na0zv4k8mj47ylw8luzyg6c0xxpspk9706",
   "swap_optimizer": "agent1q2d8jkuhml92c38ja5hs237g00y4h7v7s5f0q05c5m5uzu6kqnj0qq2t4xm",
   "executor": "agent1qtk56cc7z5499vuh43n5c4kzhve5u0khn7awcwsjn9eqfe3u2gsv7fwrrqq",
-  "demo_simulator": "agent1qgfanyq7h3sxcctdlxvnt38pa84l7x300wr7kahryhkukede9yfeuwgftsd"
+  "demo_simulator": "agent1qgfanyq7h3sxcctdlxvnt38pa84l7x300wr7kahryhkukede9yfeuwgftsd",
+  "presentation_trigger": "agent1qwmn0l3lufj7kwnp7y30aqhzvva6p57yexmk3a3l57xaz73r2q2qssm65h0"
 }

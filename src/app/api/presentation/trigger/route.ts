@@ -43,28 +43,16 @@ export async function POST(request: Request) {
       );
     }
 
-    // Forward to presentation trigger agent
+    // Forward to Position Monitor's demo trigger endpoint
     try {
-      // Convert camelCase to snake_case for Python agent compatibility
-      const eventTypeMap: Record<string, string> = {
-        'marketCrash': 'market_crash',
-        'flashCrash': 'flash_crash',
-        'gradualDecline': 'gradual_decline',
-        'randomVolatility': 'random_volatility',
-        'custom': 'custom',
-      };
-
-      const response = await fetch(`${API_CONFIG.agents.presentationTrigger}/trigger`, {
+      // Call Position Monitor's /demo/trigger endpoint
+      const response = await fetch(`${API_CONFIG.agents.positionMonitor}/demo/trigger`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          event_type: eventTypeMap[triggerConfig.type] || triggerConfig.type,
-          eth_drop: triggerConfig.ethDrop,
-          duration: triggerConfig.duration,
-          volatility: triggerConfig.volatility || 0,
-          position_id: positionId,  // Include position ID for targeted monitoring
+          position_id: positionId,  // Trigger specific demo position
         }),
       });
 
@@ -76,8 +64,8 @@ export async function POST(request: Request) {
 
       const result: TriggerResult = {
         success: true,
-        triggerId: data.trigger_id || `trigger-${Date.now()}`,
-        message: data.message || 'Trigger event sent to agents',
+        triggerId: data.position_id || `trigger-${Date.now()}`,
+        message: data.message || 'Demo position triggered - agents processing with REAL APIs',
         timestamp: Date.now(),
       };
 
@@ -86,16 +74,15 @@ export async function POST(request: Request) {
     } catch (agentError) {
       console.error('Failed to reach presentation trigger agent:', agentError);
 
-      // Return success even if agent is offline (for demo purposes)
-      // In production, you'd want to handle this differently
-      const result: TriggerResult = {
-        success: true,
-        triggerId: `mock-trigger-${Date.now()}`,
-        message: 'Trigger queued (agent offline - using simulation)',
-        timestamp: Date.now(),
-      };
-
-      return NextResponse.json(result);
+      // Return failure so frontend knows there's an issue
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Position Monitor agent is offline. Please start agents first.',
+          timestamp: Date.now(),
+        },
+        { status: 503 }
+      );
     }
 
   } catch (error) {
@@ -112,11 +99,11 @@ export async function POST(request: Request) {
   }
 }
 
-// GET endpoint to check trigger status
+// GET endpoint to check Position Monitor status
 export async function GET() {
   try {
-    // Check if presentation trigger agent is available
-    const response = await fetch(`${API_CONFIG.agents.presentationTrigger}/status`, {
+    // Check if Position Monitor agent is available
+    const response = await fetch(`${API_CONFIG.agents.positionMonitor}/status`, {
       headers: {
         'Content-Type': 'application/json',
       },
@@ -136,7 +123,7 @@ export async function GET() {
     return NextResponse.json({
       success: true,
       agentOnline: false,
-      message: 'Presentation trigger agent is offline',
+      message: 'Position Monitor agent is offline',
       timestamp: Date.now(),
     });
 
@@ -144,7 +131,7 @@ export async function GET() {
     return NextResponse.json({
       success: true,
       agentOnline: false,
-      message: 'Failed to reach presentation trigger agent',
+      message: 'Failed to reach Position Monitor agent',
       timestamp: Date.now(),
     });
   }

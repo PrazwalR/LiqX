@@ -4,29 +4,29 @@ import { API_CONFIG, NETWORK_CONFIG } from '@/lib/constants';
 import { Position, SubgraphQuery, SubgraphUserReserve } from '@/lib/types';
 import { calculateHealthFactor } from '@/lib/utils';
 
-// The Graph query for Aave V3 positions on Sepolia
+// The Graph query for LiqX custom subgraph on Sepolia
 const POSITIONS_QUERY = gql`
   query GetPositions($first: Int!, $healthFactorMax: String) {
-    userReserves(
+    positions(
       first: $first
       where: { 
-        currentATokenBalance_gt: "0"
-        user_: { borrowedReservesCount_gt: 0 }
+        isActive: true
+        debtAmount_gt: "0"
+        healthFactor_lt: $healthFactorMax
       }
-      orderBy: currentATokenBalance
-      orderDirection: desc
+      orderBy: healthFactor
+      orderDirection: asc
     ) {
       id
       user {
         id
       }
-      currentATokenBalance
-      currentTotalDebt
-      reserve {
-        symbol
-        decimals
-        priceInMarketReferenceCurrency
-      }
+      collateralAsset
+      collateralAmount
+      debtAsset
+      debtAmount
+      healthFactor
+      updatedAt
     }
   }
 `;
@@ -45,11 +45,11 @@ function generateMockPositions(count: number = 20): Position[] {
 
   // Use low-APY protocols for demo positions (so Yield Optimizer finds better alternatives)
   const lowApyProtocols = [
-    { protocol: 'compound', chain: 'ethereum' },        // Lower APY than Aave/Lido
-    { protocol: 'benqi', chain: 'avalanche' },          // Lower APY
-    { protocol: 'venus', chain: 'bnb-chain' },          // Lower APY
-    { protocol: 'geist', chain: 'fantom' },             // Lower APY
-    { protocol: 'compound', chain: 'ethereum' },        // Repeat for variety
+    { protocol: 'compound', chain: 'ethereum' },        // ETHEREUM - same chain as Aave (low gas!)
+    { protocol: 'compound', chain: 'ethereum' },        // ETHEREUM - more same-chain positions
+    { protocol: 'compound', chain: 'ethereum' },        // ETHEREUM
+    { protocol: 'compound', chain: 'ethereum' },        // ETHEREUM
+    { protocol: 'compound', chain: 'ethereum' },        // All on Ethereum for low gas costs
   ];
 
   // Deterministic values based on index (no Math.random())
@@ -87,23 +87,24 @@ function generateMockPositions(count: number = 20): Position[] {
       protocol: protocolInfo.protocol,
       chain: protocolInfo.chain,
       collateralTokens: [
+        // USDC collateral - will need to swap to WETH for Aave/Lido (triggers 1inch API!)
         {
-          token: 'WETH',
-          symbol: 'WETH',
-          amount: collateral * 0.6 / 2500,
-          amountUSD: collateral * 0.6,
+          token: 'USDC',
+          symbol: 'USDC',
+          amount: collateral * 0.7, // 70% USDC (stablecoin, 1:1 with USD)
+          amountUSD: collateral * 0.7,
         },
         {
-          token: 'WBTC',
-          symbol: 'WBTC',
-          amount: collateral * 0.4 / 50000,
-          amountUSD: collateral * 0.4,
+          token: 'DAI',
+          symbol: 'DAI',
+          amount: collateral * 0.3, // 30% DAI (another stablecoin)
+          amountUSD: collateral * 0.3,
         },
       ],
       debtTokens: [
         {
-          token: 'USDC',
-          symbol: 'USDC',
+          token: 'USDT',
+          symbol: 'USDT',
           amount: debt,
           amountUSD: debt,
         },
@@ -121,8 +122,8 @@ export async function GET(request: Request) {
   const limit = parseInt(searchParams.get('limit') || '20');
 
   try {
-    // Demo mode: return mock data
-    if (mode === 'demo') {
+    // Demo/Presentation mode: return mock data (no real positions on testnet with positive HF)
+    if (mode === 'demo' || mode === 'presentation') {
       const positions = generateMockPositions(limit);
 
       return NextResponse.json({
@@ -131,76 +132,53 @@ export async function GET(request: Request) {
         totalCount: positions.length,
         atRiskCount: positions.filter(p => p.healthFactor < 1.5).length,
         timestamp: Date.now(),
+        source: 'mock_data',
+        note: 'Using mock positions - all testnet positions are liquidated (negative HF)'
       });
     }
 
-    // Presentation/Production mode: fetch from The Graph
+    // Production mode: fetch from Position Monitor agent
     try {
-      let data;
-      try {
-        // Try primary subgraph endpoint
-        data = await gqlRequest<SubgraphQuery>(
-          API_CONFIG.theGraph.subgraphUrl,
-          POSITIONS_QUERY,
-          {
-            first: limit,
-            healthFactorMax: '2000000000000000000', // 2.0 in Wei (filter for at-risk positions)
-          }
-        );
-      } catch (primaryError) {
-        // Try fallback endpoint if primary fails
-        if ('fallbackUrl' in API_CONFIG.theGraph) {
-          try {
-            data = await gqlRequest<SubgraphQuery>(
-              (API_CONFIG.theGraph as any).fallbackUrl,
-              POSITIONS_QUERY,
-              {
-                first: limit,
-                healthFactorMax: '2000000000000000000',
-              }
-            );
-          } catch (fallbackError) {
-            throw primaryError; // Throw original error if fallback also fails
-          }
-        } else {
-          throw primaryError;
-        }
+      const agentResponse = await fetch('http://localhost:8101/positions', {
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!agentResponse.ok) {
+        throw new Error(`Position Monitor returned ${agentResponse.status}`);
       }
 
-      // Transform subgraph data to our Position type
-      const positions: Position[] = (data.userReserves || []).map((reserve: SubgraphUserReserve) => {
-        const balance = parseFloat(reserve.currentATokenBalance);
-        const debt = parseFloat(reserve.currentTotalDebt);
-        const decimals = parseInt(reserve.reserve.decimals);
-        const price = parseFloat(reserve.reserve.priceInMarketReferenceCurrency);
+      const agentData = await agentResponse.json();
 
-        const collateralUSD = (balance / Math.pow(10, decimals)) * price;
-        const debtUSD = (debt / Math.pow(10, decimals)) * price;
-        const hf = calculateHealthFactor(collateralUSD, debtUSD);
-
+      // Transform agent data to frontend Position type
+      const positions: Position[] = (agentData.positions || []).map((pos: any) => {
         return {
-          id: reserve.id,
-          user: reserve.user.id,
-          totalCollateralUSD: collateralUSD,
-          totalDebtUSD: debtUSD,
-          healthFactor: hf,
+          id: pos.id,
+          user: pos.user,
+          totalCollateralUSD: pos.collateral_usd || 0,
+          totalDebtUSD: pos.debt_usd || 0,
+          healthFactor: pos.health_factor || 0,
+          protocol: pos.protocol || 'aave',
+          chain: pos.chain || 'sepolia',
           collateralTokens: [
             {
-              token: reserve.reserve.symbol,
-              symbol: reserve.reserve.symbol,
-              amount: balance / Math.pow(10, decimals),
-              amountUSD: collateralUSD,
+              token: pos.collateral_token,
+              symbol: pos.collateral_token,
+              amount: pos.collateral_amount / 1e18,
+              amountUSD: pos.collateral_usd || 0,
             },
           ],
           debtTokens: [
             {
-              token: 'USDC', // Simplified - would parse from reserve data
-              symbol: 'USDC',
-              amount: debt / Math.pow(10, decimals),
-              amountUSD: debtUSD,
+              token: pos.debt_token,
+              symbol: pos.debt_token,
+              amount: pos.debt_amount / 1e18,
+              amountUSD: pos.debt_usd || 0,
             },
           ],
-          lastUpdate: Date.now(),
+          lastUpdate: pos.last_updated * 1000,
         };
       });
 
@@ -210,24 +188,22 @@ export async function GET(request: Request) {
         totalCount: positions.length,
         atRiskCount: positions.filter(p => p.healthFactor < 1.5).length,
         timestamp: Date.now(),
+        source: 'position_monitor_agent',
       });
 
-    } catch (graphError) {
-      // Silently fallback to mock data - this is expected in demo/hackathon mode
-      console.warn('📊 The Graph unavailable - using mock data for presentation');
+    } catch (agentError) {
+      console.error('❌ Position Monitor agent unavailable:', agentError);
 
-      // Fallback to mock data if The Graph is unavailable
-      const positions = generateMockPositions(limit);
-
-      return NextResponse.json({
-        success: true,
-        positions,
-        totalCount: positions.length,
-        atRiskCount: positions.filter(p => p.healthFactor < 1.5).length,
-        timestamp: Date.now(),
-        mode: 'mock',
-        warning: 'Using simulated positions for demo',
-      });
+      // Return error response - NO MOCK DATA FALLBACK
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Position Monitor agent unavailable',
+          details: agentError instanceof Error ? agentError.message : 'Unknown error',
+          timestamp: Date.now(),
+        },
+        { status: 503 }
+      );
     }
 
   } catch (error) {

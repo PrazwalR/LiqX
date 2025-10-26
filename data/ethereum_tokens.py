@@ -19,26 +19,25 @@ ETHEREUM_TOKEN_MAP = {
     "0xae78736cd615f374d3085123a210448e74fc6393": "rETH",  # Rocket Pool ETH
 }
 
-
 def get_token_symbol(address: str) -> str:
     """
     Get token symbol from Ethereum mainnet address
-
+    
     Args:
         address: Token contract address (checksummed or lowercase)
-
+        
     Returns:
         Token symbol or "UNKNOWN" if not found
     """
     if not address:
         return "UNKNOWN"
-
+    
     # Normalize to lowercase for lookup
     normalized = address.lower()
-
+    
     # Check if it's a known token
     if normalized in ETHEREUM_TOKEN_MAP:
         return ETHEREUM_TOKEN_MAP[normalized]
-
+    
     # Return UNKNOWN for unmapped tokens
     return "UNKNOWN"

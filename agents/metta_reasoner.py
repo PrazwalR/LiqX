@@ -377,7 +377,7 @@ class MeTTaReasoner:
         """
         Score a strategy (0-100)
 
-        Uses MeTTa reasoning for intelligent scoring
+        Uses MeTTa reasoning for intelligent scoring, falls back to heuristics
         """
         if self.metta_available and self.metta:
             expression = f"!(score-strategy {apy_improvement} {break_even_months} {urgency} {amount})"
@@ -390,8 +390,33 @@ class MeTTaReasoner:
                 except ValueError:
                     pass
 
-        logger.error("MeTTa reasoning not available for strategy scoring")
-        raise RuntimeError("MeTTa reasoning is required but not available")
+        # Fallback heuristic scoring when MeTTa is not available
+        logger.debug("Using fallback heuristic scoring (MeTTa not available)")
+
+        # APY improvement: 0-40 points (higher is better)
+        apy_score = min(40, (apy_improvement / 100) * 40)
+
+        # Break-even time: 0-30 points (faster is better)
+        if break_even_months <= 1:
+            breakeven_score = 30
+        elif break_even_months <= 3:
+            breakeven_score = 20
+        elif break_even_months <= 6:
+            breakeven_score = 10
+        else:
+            breakeven_score = 0
+
+        # Urgency: 0-20 points (higher urgency = prefer faster execution)
+        urgency_score = (urgency / 10) * 20
+
+        # Position size: 0-10 points (larger positions = worth higher costs)
+        size_score = min(10, (amount / 50000) * 10)
+
+        total_score = apy_score + breakeven_score + urgency_score + size_score
+        logger.debug(
+            f"📊 Fallback score: {total_score:.1f}/100 (APY: {apy_score:.1f}, BE: {breakeven_score:.1f}, Urgency: {urgency_score:.1f}, Size: {size_score:.1f})")
+
+        return total_score
 
     def select_execution_method(
         self,
@@ -415,9 +440,28 @@ class MeTTaReasoner:
                 logger.debug(f"🧠 MeTTa execution method: {method}")
                 return method
 
-        logger.error(
-            "MeTTa reasoning not available for execution method selection")
-        raise RuntimeError("MeTTa reasoning is required but not available")
+        # Fallback heuristic execution method selection
+        logger.debug(
+            "Using fallback heuristic execution method selection (MeTTa not available)")
+
+        # Same chain = direct swap
+        if from_chain == to_chain:
+            return "direct-swap"
+
+        # PYUSD special handling
+        if "pyusd" in from_chain.lower() or "pyusd" in to_chain.lower():
+            return "layerzero-pyusd"
+
+        # Solana cross-chain = use Fusion+ (1inch)
+        if from_chain == "solana" or to_chain == "solana":
+            return "fusion-cross-chain"
+
+        # EVM cross-chain = use Fusion+ (1inch)
+        if from_chain in ["ethereum", "arbitrum", "optimism", "base"] and to_chain in ["ethereum", "arbitrum", "optimism", "base"]:
+            return "fusion-cross-chain"
+
+        # Default fallback
+        return "standard-bridge"
 
     def select_optimal_strategy(
         self,
@@ -439,13 +483,18 @@ class MeTTaReasoner:
             current_apy: Current APY
             amount: Amount to move (USD)
             risk_level: Risk level from assessment
-            urgency: Urgency score (0-10)
+            urgency: Urgency score (0-10) or string ('low', 'medium', 'high')
             market_trend: Market trend (crash, declining, stable, rising)
             available_strategies: List of available target protocols
 
         Returns:
             Optimal strategy with reasoning
         """
+        # Convert string urgency to integer (0-10 scale)
+        if isinstance(urgency, str):
+            urgency_map = {'low': 3, 'medium': 6, 'high': 9}
+            urgency = urgency_map.get(urgency.lower(), 6)
+
         best_strategy = None
         best_score = 0
 
@@ -482,6 +531,8 @@ class MeTTaReasoner:
                 "source_chain": current_chain,
                 "target_protocol": target['protocol'],
                 "target_chain": target['chain'],
+                # Include target asset
+                "target_token": target.get('token', 'USDC'),
                 "current_apy": current_apy,
                 "target_apy": target['apy'],
                 "apy_improvement": profitability['apy_improvement'],

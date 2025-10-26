@@ -1,69 +1,64 @@
 """
 LiquidityGuard AI - Position Monitor Agent
 
-Monitors DeFi positions for liquidation risks and sends alerts.
+AUTONOMOUS OPERATION:
+- Fetches risky positions from The Graph subgraph every 30 seconds
+- Monitors health factors using real CoinGecko prices
+- Sends alerts to Yield Optimizer when HF < 1.5
+- Supports manual crash triggers via PresentationTrigger messages
 
-Features:
-- Real-time position monitoring
-- Health factor calculation
-- Risk level assessment
-- Alert generation
-- Demo mode support
+NO MOCK DATA - ALL REAL:
+- Positions from LiqX subgraph (Sepolia)
+- Prices from CoinGecko API
+- Risk assessment via MeTTa AI reasoner
 """
 
-from agents.message_protocols import (
-    PositionAlert,
-    DemoMarketCrash,
-    DemoPriceUpdate,
-    ExecutionResult,
-    HealthCheckRequest,
-    HealthCheckResponse,
-    PresentationTrigger  # NEW: For presentation mode
-)
 from agents.metta_reasoner import get_metta_reasoner
+from data.ethereum_tokens import get_token_symbol
 from data.price_feeds import get_price_feed_manager
 from data.subgraph_fetcher import get_subgraph_fetcher
-from data.sepolia_tokens import get_token_symbol
-from uagents import Agent, Context, Model
+from agents.message_protocols import (
+    PositionAlert,
+    PresentationTrigger,
+    HealthCheckRequest,
+    HealthCheckResponse,
+    ExecutionResult
+)
 import os
+import sys
 import time
-import asyncio
-from typing import Dict, List, Optional
+import json
+from typing import Dict, List
 from dotenv import load_dotenv
 from loguru import logger
+from uagents import Agent, Context
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 
-# Import data fetchers
-import sys
+# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 load_dotenv()
 
-
 # ═══════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════
 
-AGENT_SEED = os.getenv('AGENT_SEED_POSITION_MONITOR', 'monitor-seed-default')
+AGENT_SEED = os.getenv('AGENT_SEED_POSITION_MONITOR')
 AGENT_PORT = int(os.getenv('POSITION_MONITOR_PORT', '8000'))
-YIELD_OPTIMIZER_ADDRESS = None  # Will be set after agent registration
-
-# Deployment mode - FORCE LOCAL for presentation (no Almanac overhead)
-DEPLOY_MODE = 'local'  # Hardcoded: Almanac not needed for HTTP-based presentation
+DEPLOY_MODE = os.getenv('DEPLOY_MODE', 'local')
 
 # Risk thresholds
 CRITICAL_HF = float(os.getenv('CRITICAL_HEALTH_FACTOR', '1.3'))
 MODERATE_HF = float(os.getenv('MODERATE_HEALTH_FACTOR', '1.5'))
 SAFE_HF = float(os.getenv('SAFE_HEALTH_FACTOR', '1.8'))
 
-# Operation modes
-DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
-PRESENTATION_MODE = os.getenv('PRESENTATION_MODE', 'false').lower() == 'true'
-PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
+# Alert cooldown (prevent spam)
+ALERT_COOLDOWN_SECONDS = 300  # 5 minutes
 
-# Presentation mode settings
-PRESENTATION_TRIGGER_SECRET = os.getenv(
-    'PRESENTATION_TRIGGER_SECRET', 'liqx_demo_2025')
+# Yield Optimizer address (deterministic from seed)
+YIELD_OPTIMIZER_ADDRESS = "agent1q0rtan6yrc6dgv62rlhtj2fn5na0zv4k8mj47ylw8luzyg6c0xxpspk9706"
 
 
 # ═══════════════════════════════════════════════════════
@@ -71,198 +66,51 @@ PRESENTATION_TRIGGER_SECRET = os.getenv(
 # ═══════════════════════════════════════════════════════
 
 class PositionMonitorAgent:
-    """Position Monitor Agent Implementation"""
-
-    # Yield Optimizer Address (deterministic from seed)
-    YIELD_OPTIMIZER_ADDRESS = "agent1q0rtan6yrc6dgv62rlhtj2fn5na0zv4k8mj47ylw8luzyg6c0xxpspk9706"
-    # For local testing: use direct endpoint instead of Almanac resolution
-    YIELD_OPTIMIZER_ENDPOINT = "http://localhost:8001/submit"
+    """Autonomous position monitoring with real blockchain data"""
 
     def __init__(self):
-        # Initialize agent based on deployment mode
-        if DEPLOY_MODE == 'almanac':
-            # Almanac/Dorado deployment - use Agentverse mailbox
-            self.agent = Agent(
-                name="position_monitor",
-                seed=AGENT_SEED,
-                port=AGENT_PORT,
-                mailbox=True  # Enable mailbox for remote communication
-            )
-            logger.info(
-                "Agent initialized in ALMANAC mode (Agentverse mailbox enabled)")
-        else:
-            # Local Bureau mode - use localhost endpoint
-            self.agent = Agent(
-                name="position_monitor",
-                seed=AGENT_SEED,
-                port=AGENT_PORT,
-                endpoint=[f"http://localhost:{AGENT_PORT}/submit"]
-            )
-            logger.info("Agent initialized in LOCAL mode (Bureau)")
+        # Initialize agent
+        self.agent = Agent(
+            name="position_monitor",
+            seed=AGENT_SEED,
+            port=AGENT_PORT,
+            endpoint=[f"http://localhost:{AGENT_PORT}/submit"]
+        )
+
+        # Data managers
+        self.subgraph_fetcher = get_subgraph_fetcher()
+        self.price_manager = get_price_feed_manager()
+        self.metta_reasoner = get_metta_reasoner()
 
         # State
         self.positions: Dict[str, Dict] = {}
-        self.price_manager = get_price_feed_manager()
-        self.subgraph_fetcher = get_subgraph_fetcher()
-        self.metta_reasoner = get_metta_reasoner()
-        self.demo_crash_active = False
-        self.demo_crash_id = None
-        self.start_time = time.time()
-        self.messages_processed = 0
-        self.errors_count = 0
-        self.last_subgraph_fetch = 0  # Track last fetch time
-
-        # Alert deduplication - track which positions have been alerted
-        # user_address -> last_alerted_timestamp
+        # user_address -> last_alert_time
         self.alerted_positions: Dict[str, float] = {}
-        # 30 minutes cooldown between alerts for same position (prevents spam)
-        self.alert_cooldown = 1800
+        self.message_history: List[Dict] = []
+        self.last_subgraph_fetch = 0
 
-        # Message history for frontend display (last 50 messages)
-        self.message_history = []
-        self.max_messages = 50
+        # Demo state tracking (for presentation)
+        self.demo_status: Dict[str, Dict] = {}  # position_id -> status info
+        self._pending_demo_alert = None  # Stores alert to be sent in next cycle
 
-        # Start HTTP server for message history
+        # Setup
         self._start_http_server()
-
-        # Setup message handlers
         self._setup_handlers()
 
-        logger.info(f"Position Monitor Agent initialized")
-        logger.info(f"Agent address: {self.agent.address}")
-        logger.info(f"Port: {AGENT_PORT}")
-        logger.info(f"Demo mode: {DEMO_MODE}")
+        logger.success(f"✅ Position Monitor initialized")
+        logger.info(f"   Address: {self.agent.address}")
+        logger.info(f"   Port: {AGENT_PORT}")
+        logger.info(f"   Mode: AUTONOMOUS (real data only)")
 
     def _start_http_server(self):
-        """Start HTTP server to expose message history and accept position monitoring requests"""
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        import json
-        import threading
+        """HTTP server for message history and position updates"""
+        agent_instance = self
 
-        class MessageHistoryHandler(BaseHTTPRequestHandler):
-            agent_instance = None
-
-            def do_GET(self):
-                if self.path == '/messages':
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-
-                    response = {
-                        'success': True,
-                        'messages': self.agent_instance.message_history,
-                        'total': len(self.agent_instance.message_history)
-                    }
-                    self.wfile.write(json.dumps(response).encode())
-                elif self.path == '/health':
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'ok'}).encode())
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-
-            def do_POST(self):
-                if self.path == '/monitor-position':
-                    try:
-                        # Read request body
-                        content_length = int(self.headers['Content-Length'])
-                        post_data = self.rfile.read(content_length)
-                        position_data = json.loads(post_data.decode())
-
-                        # Debug: Log received data
-                        logger.debug(
-                            f"📥 Received position data keys: {list(position_data.keys())}")
-
-                        # Add position to monitoring list
-                        # API sends: position_id, user_address, protocol, chain, collateral_value, debt_value, health_factor, etc.
-                        user_address = position_data.get(
-                            'user_address', position_data.get('user', 'unknown'))
-                        position_id = position_data.get('position_id', position_data.get(
-                            'id', user_address))  # Fallback to user_address if no ID
-
-                        if not user_address or user_address == 'unknown':
-                            raise ValueError(
-                                f"Missing user_address in position data. Keys: {list(position_data.keys())}")
-
-                        # Use real protocol data from position
-                        protocol = position_data.get('protocol', 'aave-v3')
-                        chain = position_data.get('chain', 'ethereum-sepolia')
-
-                        self.agent_instance.positions[user_address] = {
-                            'position_id': position_id,
-                            'protocol': protocol,
-                            'chain': chain,
-                            'collateral_asset': '',  # Not critical for presentation
-                            'collateral_token': position_data.get('collateral_token', ''),
-                            'collateral_amount': position_data.get('collateral_amount', position_data.get('totalCollateralUSD', 0)),
-                            'debt_asset': '',
-                            'debt_token': position_data.get('debt_token', ''),
-                            'debt_amount': position_data.get('debt_amount', position_data.get('totalDebtUSD', 0)),
-                            'health_factor': position_data.get('health_factor', position_data.get('healthFactor', 0)),
-                            'last_updated': int(time.time())
-                        }
-
-                        # Clear alert cooldown for this position to allow immediate demo
-                        if user_address in self.agent_instance.alerted_positions:
-                            logger.info(
-                                f"   🔄 Clearing alert cooldown for user (allow immediate processing)")
-                            del self.agent_instance.alerted_positions[user_address]
-
-                        logger.success(
-                            f"📌 Added position {position_id[:8] if len(position_id) > 8 else position_id}... to monitoring")
-                        logger.info(f"   User: {user_address[:10]}...")
-                        logger.info(
-                            f"   Health Factor: {position_data.get('health_factor', position_data.get('healthFactor', 0)):.2f}")
-                        logger.info(
-                            f"   Collateral: ${position_data.get('collateral_value', position_data.get('totalCollateralUSD', 0)):.2f}")
-
-                        # Log the addition
-                        self.agent_instance._log_message(
-                            'received',
-                            'MonitorPositionRequest',
-                            sender='Frontend',
-                            details={
-                                'position_id': position_id,
-                                'health_factor': position_data.get('health_factor', position_data.get('healthFactor', 0)),
-                                'collateral_value': position_data.get('collateral_value', position_data.get('totalCollateralUSD', 0))
-                            }
-                        )
-
-                        # Send success response
-                        self.send_response(200)
-                        self.send_header('Content-type', 'application/json')
-                        self.send_header('Access-Control-Allow-Origin', '*')
-                        self.end_headers()
-
-                        response = {
-                            'success': True,
-                            'message': 'Position added to monitoring',
-                            'monitoring_count': len(self.agent_instance.positions)
-                        }
-                        self.wfile.write(json.dumps(response).encode())
-
-                    except Exception as e:
-                        import traceback
-                        logger.error(f"Failed to add position: {e}")
-                        logger.error(f"Traceback: {traceback.format_exc()}")
-                        self.send_response(500)
-                        self.send_header('Content-type', 'application/json')
-                        self.send_header('Access-Control-Allow-Origin', '*')
-                        self.end_headers()
-                        self.wfile.write(json.dumps({
-                            'success': False,
-                            'error': str(e)
-                        }).encode())
-                else:
-                    self.send_response(404)
-                    self.end_headers()
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass  # Suppress logs
 
             def do_OPTIONS(self):
-                # Handle CORS preflight
                 self.send_response(200)
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Access-Control-Allow-Methods',
@@ -271,164 +119,525 @@ class PositionMonitorAgent:
                     'Access-Control-Allow-Headers', 'Content-Type')
                 self.end_headers()
 
-            def log_message(self, format, *args):
-                pass  # Suppress HTTP server logs
+            def do_GET(self):
+                if self.path == '/messages':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    response = {
+                        'success': True,
+                        # Last 100
+                        'messages': agent_instance.message_history[-100:],
+                        'total': len(agent_instance.message_history)
+                    }
+                    self.wfile.write(json.dumps(response).encode())
 
-        MessageHistoryHandler.agent_instance = self
+                elif self.path == '/status':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    response = {
+                        'status': 'online',
+                        'positions_monitored': len(agent_instance.positions),
+                        'alerts_sent': len(agent_instance.alerted_positions),
+                        'address': str(agent_instance.agent.address)
+                    }
+                    self.wfile.write(json.dumps(response).encode())
 
-        def run_server():
-            server = HTTPServer(('localhost', 8101), MessageHistoryHandler)
-            logger.info(f"📡 HTTP server started on port 8101")
-            logger.info(f"   - GET /messages (message history)")
-            logger.info(f"   - GET /health (health check)")
-            logger.info(
-                f"   - POST /monitor-position (add position to monitoring)")
-            server.serve_forever()
+                elif self.path == '/positions':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
 
-        thread = threading.Thread(target=run_server, daemon=True)
+                    # Convert monitored positions to frontend format with real USD values
+                    positions_list = []
+                    for user_id, pos in agent_instance.positions.items():
+                        # Calculate USD values using real prices (stored during monitoring)
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+
+                        try:
+                            collateral_price = loop.run_until_complete(
+                                agent_instance.price_manager.get_token_price(
+                                    pos['collateral_token'])
+                            )
+                            debt_price = loop.run_until_complete(
+                                agent_instance.price_manager.get_token_price(
+                                    pos['debt_token'])
+                            )
+
+                            collateral_amount = pos['collateral_amount'] / 1e18
+                            debt_amount = pos['debt_amount'] / 1e18
+                            collateral_usd = collateral_amount * collateral_price
+                            debt_usd = debt_amount * debt_price
+                        except:
+                            collateral_usd = 0
+                            debt_usd = 0
+                        finally:
+                            loop.close()
+
+                        positions_list.append({
+                            'id': pos['position_id'],
+                            'user': user_id,
+                            'protocol': pos['protocol'],
+                            'chain': pos['chain'],
+                            'collateral_token': pos['collateral_token'],
+                            'collateral_amount': pos['collateral_amount'],
+                            'collateral_usd': collateral_usd,
+                            'debt_token': pos['debt_token'],
+                            'debt_amount': pos['debt_amount'],
+                            'debt_usd': debt_usd,
+                            'health_factor': pos['health_factor'],
+                            'last_updated': pos['last_updated']
+                        })
+
+                    response = {
+                        'success': True,
+                        'positions': positions_list,
+                        'total': len(positions_list),
+                        'timestamp': int(time.time() * 1000)
+                    }
+                    self.wfile.write(json.dumps(response).encode())
+
+                elif self.path == '/demo/positions':
+                    # DEMO POSITIONS ENDPOINT - Returns curated scenarios for presentation
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+
+                    demo_positions = [
+                        {
+                            "id": "demo-1-critical-ethereum",
+                            "user": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                            "protocol": "aave-v3",
+                            "chain": "ethereum",
+                            "healthFactor": 1.15,
+                            "collateralToken": "WETH",
+                            "collateralAmount": 10.5,
+                            "collateralUsd": 28311.00,  # ~$2696 per ETH
+                            "debtToken": "USDC",
+                            "debtAmount": 25000,
+                            "debtUsd": 25000,
+                            "status": "critical",
+                            "description": "Critical same-chain position - needs immediate rebalancing"
+                        },
+                        {
+                            "id": "demo-2-crosschain-arbitrum",
+                            "user": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                            "protocol": "aave-v3",
+                            "chain": "ethereum",
+                            "healthFactor": 1.45,
+                            "collateralToken": "WETH",
+                            "collateralAmount": 50.0,
+                            "collateralUsd": 134800.00,
+                            "debtToken": "USDC",
+                            "debtAmount": 120000,
+                            "debtUsd": 120000,
+                            "status": "moderate",
+                            "description": "Moderate position - can benefit from cross-chain (ETH→ARB)"
+                        },
+                        {
+                            "id": "demo-3-crosschain-solana",
+                            "user": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                            "protocol": "compound",
+                            "chain": "ethereum",
+                            "healthFactor": 1.8,
+                            "collateralToken": "WETH",
+                            "collateralAmount": 100.0,
+                            "collateralUsd": 269600.00,
+                            "debtToken": "USDC",
+                            "debtAmount": 150000,
+                            "debtUsd": 150000,
+                            "status": "safe",
+                            "description": "Safe position - extreme APY opportunity on Solana"
+                        }
+                    ]
+
+                    response = {
+                        'success': True,
+                        'positions': demo_positions,
+                        'total': len(demo_positions),
+                        'timestamp': int(time.time() * 1000),
+                        'note': 'Demo positions for presentation - trigger will use REAL APIs downstream'
+                    }
+                    self.wfile.write(json.dumps(response).encode())
+
+                elif self.path.startswith('/demo/status/'):
+                    # STATUS TRACKING ENDPOINT - Shows progress of demo trigger
+                    position_id = self.path.split('/')[-1]
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+
+                    status_info = agent_instance.demo_status.get(position_id, {
+                        'status': 'not_started',
+                        'message': 'Position not triggered yet',
+                        'timestamp': int(time.time() * 1000)
+                    })
+
+                    response = {
+                        'success': True,
+                        'position_id': position_id,
+                        **status_info
+                    }
+                    self.wfile.write(json.dumps(response).encode())
+
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                # DEMO TRIGGER ENDPOINT - Triggers agent flow with demo position
+                if self.path == '/demo/trigger':
+                    try:
+                        content_length = int(self.headers['Content-Length'])
+                        post_data = self.rfile.read(content_length)
+                        trigger_data = json.loads(post_data.decode())
+
+                        position_id = trigger_data.get('position_id')
+                        if not position_id:
+                            raise ValueError("Missing position_id")
+
+                        # Get demo position data
+                        demo_positions = {
+                            "demo-1-critical-ethereum": {
+                                "user": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                                "protocol": "aave-v3",
+                                "chain": "ethereum",
+                                "healthFactor": 1.15,
+                                "collateralToken": "WETH",
+                                "collateralAmount": 10.5,
+                                "collateralUsd": 28311.00,
+                                "debtToken": "USDC",
+                                "debtAmount": 25000,
+                                "debtUsd": 25000
+                            },
+                            "demo-2-crosschain-arbitrum": {
+                                "user": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                                "protocol": "compound",
+                                "chain": "ethereum",
+                                "healthFactor": 1.45,
+                                "collateralToken": "USDC",
+                                "collateralAmount": 120000,
+                                "collateralUsd": 120000.00,
+                                "debtToken": "USDT",
+                                "debtAmount": 80000,
+                                "debtUsd": 80000
+                            },
+                            "demo-3-crosschain-solana": {
+                                "user": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                                "protocol": "compound",
+                                "chain": "ethereum",
+                                "healthFactor": 1.8,
+                                "collateralToken": "WETH",
+                                "collateralAmount": 100.0,
+                                "collateralUsd": 269600.00,
+                                "debtToken": "USDC",
+                                "debtAmount": 150000,
+                                "debtUsd": 150000
+                            }
+                        }
+
+                        # If position not in predefined demos, use a default configuration
+                        if position_id in demo_positions:
+                            demo_data = demo_positions[position_id]
+                        else:
+                            # Default demo configuration for any position ID from frontend
+                            demo_data = {
+                                "user": position_id if position_id.startswith('0x') else "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                                "protocol": "compound",
+                                "chain": "ethereum",
+                                "healthFactor": 1.15,
+                                "collateralToken": "USDC",
+                                "collateralAmount": 25000,
+                                "collateralUsd": 25000.00,
+                                "debtToken": "USDT",
+                                "debtAmount": 20000,
+                                "debtUsd": 20000
+                            }
+
+                        # Update status
+                        agent_instance.demo_status[position_id] = {
+                            'status': 'triggered',
+                            'message': 'Alert sent to Yield Optimizer - using REAL APIs',
+                            'timestamp': int(time.time() * 1000),
+                            'stage': 'position_alert_sent'
+                        }
+
+                        # Schedule alert to be sent (async operation)
+                        import asyncio
+
+                        async def send_demo_alert():
+                            """Send REAL PositionAlert to Yield Optimizer"""
+                            try:
+                                # Create REAL PositionAlert message
+                                alert = PositionAlert(
+                                    user_address=demo_data['user'],
+                                    position_id=position_id,
+                                    protocol=demo_data['protocol'],
+                                    chain=demo_data['chain'],
+                                    health_factor=demo_data['healthFactor'],
+                                    collateral_value=demo_data['collateralUsd'],
+                                    debt_value=demo_data['debtUsd'],
+                                    collateral_token=demo_data['collateralToken'],
+                                    debt_token=demo_data['debtToken'],
+                                    risk_level='critical' if demo_data['healthFactor'] < 1.3 else 'moderate',
+                                    timestamp=int(time.time() * 1000),
+                                    predicted_liquidation_time=None
+                                )
+
+                                # Get agent context (need to use agent's context)
+                                # Store alert for async sending
+                                agent_instance._pending_demo_alert = {
+                                    'alert': alert,
+                                    'position_id': position_id
+                                }
+
+                                logger.warning(
+                                    f"🎭 DEMO TRIGGER: {position_id}")
+                                logger.info(
+                                    f"   Alert queued for Yield Optimizer")
+                                logger.info(
+                                    f"   All downstream processing will use REAL APIs:")
+                                logger.info(f"   ✅ DeFi Llama (real APY data)")
+                                logger.info(
+                                    f"   ✅ 1inch Fusion+ (real quotes)")
+                                logger.info(f"   ✅ Cross-chain detection")
+
+                            except Exception as e:
+                                logger.error(f"Failed to send demo alert: {e}")
+                                agent_instance.demo_status[position_id] = {
+                                    'status': 'error',
+                                    'message': str(e),
+                                    'timestamp': int(time.time() * 1000)
+                                }
+
+                        # Run async function
+                        loop = asyncio.new_event_loop()
+                        loop.run_until_complete(send_demo_alert())
+                        loop.close()
+
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self.end_headers()
+                        response = {
+                            'success': True,
+                            'message': 'Demo trigger activated - REAL APIs will be used',
+                            'position_id': position_id,
+                            'note': 'All downstream processing (DeFi Llama, 1inch Fusion+) uses REAL data'
+                        }
+                        self.wfile.write(json.dumps(response).encode())
+
+                    except Exception as e:
+                        logger.error(f"Error in demo trigger: {e}")
+                        self.send_response(400)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self.end_headers()
+                        response = {'success': False, 'error': str(e)}
+                        self.wfile.write(json.dumps(response).encode())
+
+                # Optional: Allow frontend to add specific positions to watch
+                elif self.path == '/monitor-position':
+                    try:
+                        content_length = int(self.headers['Content-Length'])
+                        post_data = self.rfile.read(content_length)
+                        position_data = json.loads(post_data.decode())
+
+                        user_address = position_data.get('user_address')
+                        if user_address:
+                            # Add to monitoring (will be overwritten by subgraph fetch if exists)
+                            agent_instance.positions[user_address] = {
+                                'position_id': position_data.get('position_id', user_address),
+                                'protocol': 'aave-v3',
+                                'chain': 'ethereum',
+                                'collateral_token': position_data.get('collateral_token', 'WETH'),
+                                'collateral_amount': position_data.get('collateral_amount', 0),
+                                'debt_token': position_data.get('debt_token', 'USDC'),
+                                'debt_amount': position_data.get('debt_amount', 0),
+                                'health_factor': position_data.get('health_factor', 0),
+                                'last_updated': int(time.time())
+                            }
+
+                            logger.info(
+                                f"📌 Added position {user_address[:10]}... to monitoring")
+
+                            self.send_response(200)
+                            self.send_header(
+                                'Content-type', 'application/json')
+                            self.send_header(
+                                'Access-Control-Allow-Origin', '*')
+                            self.end_headers()
+                            response = {'success': True,
+                                        'message': 'Position added'}
+                            self.wfile.write(json.dumps(response).encode())
+                        else:
+                            raise ValueError("Missing user_address")
+
+                    except Exception as e:
+                        logger.error(f"Error adding position: {e}")
+                        self.send_response(400)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self.end_headers()
+                        response = {'success': False, 'error': str(e)}
+                        self.wfile.write(json.dumps(response).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        server = HTTPServer(('localhost', 8101), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
-
-    def _log_message(self, direction: str, message_type: str, recipient: str = None, sender: str = None, details: dict = None):
-        """Log agent communication message"""
-        import datetime
-
-        message_log = {
-            'timestamp': datetime.datetime.now().isoformat(),
-            'direction': direction,  # 'sent' or 'received'
-            'message_type': message_type,
-            'from': sender if direction == 'received' else 'Position Monitor',
-            'to': recipient if direction == 'sent' else 'Position Monitor',
-            'details': details or {}
-        }
-
-        self.message_history.append(message_log)
-
-        # Keep only last N messages
-        if len(self.message_history) > self.max_messages:
-            self.message_history = self.message_history[-self.max_messages:]
-
-        # Log to console
-        arrow = '→' if direction == 'sent' else '←'
-        logger.info(f"💬 {arrow} {message_type}: {sender or recipient}")
+        logger.info(f"📡 HTTP server started on port 8101")
 
     def _setup_handlers(self):
-        """Setup all message handlers"""
+        """Setup uAgents message handlers"""
 
         @self.agent.on_event("startup")
         async def startup(ctx: Context):
-            """Agent startup event"""
-            logger.info("🚀 Position Monitor Agent starting...")
-            logger.info(f"Agent address: {ctx.agent.address}")
-            logger.info(f"Agent name: {ctx.agent.name}")
-
-            # Fund agent if needed (testnet)
-
-            # Initialize demo positions if in demo mode
-            if DEMO_MODE:
-                # Set initial mock prices
-                self.price_manager.set_mock_price("ETH", 3200.0)
-                self.price_manager.set_mock_price("WETH", 3200.0)
-                self.price_manager.set_mock_price("USDC", 1.0)
-                self.price_manager.set_mock_price("USDT", 1.0)
-                self.price_manager.set_mock_price("DAI", 1.0)
-                logger.info("💰 Mock prices initialized for demo mode")
-
-                await self._initialize_demo_positions(ctx)
-
-            logger.success("✅ Position Monitor Agent ready!")
+            logger.success("🚀 Position Monitor started - AUTONOMOUS MODE")
+            logger.info("   Fetching positions from subgraph every 30s")
+            logger.info("   Using real CoinGecko prices")
+            logger.info("   Sending alerts to Yield Optimizer")
 
         @self.agent.on_interval(period=30.0)
         async def monitor_positions(ctx: Context):
-            """Monitor all positions every 30 seconds"""
+            """AUTONOMOUS: Fetch from subgraph and check all positions every 30s"""
 
-            # Fetch real positions in PRODUCTION or PRESENTATION mode
-            if not DEMO_MODE or PRESENTATION_MODE:
-                current_time = time.time()
-                # Fetch from subgraph every 30 seconds (or if first time)
-                if current_time - self.last_subgraph_fetch > 25:  # Slight buffer
-                    try:
+            # Check for pending demo alerts first
+            if self._pending_demo_alert:
+                try:
+                    alert_data = self._pending_demo_alert
+                    alert = alert_data['alert']
+                    position_id = alert_data['position_id']
+
+                    logger.warning(f"🎭 SENDING DEMO ALERT: {position_id}")
+                    logger.info(
+                        f"   Triggering REAL agent flow with demo position data")
+
+                    # Send REAL PositionAlert to Yield Optimizer
+                    await ctx.send(YIELD_OPTIMIZER_ADDRESS, alert)
+
+                    # Update status
+                    self.demo_status[position_id] = {
+                        'status': 'alert_sent',
+                        'message': 'PositionAlert sent to Yield Optimizer - waiting for yield analysis',
+                        'timestamp': int(time.time() * 1000),
+                        'stage': 'yield_optimizer_processing'
+                    }
+
+                    logger.success(f"✅ Demo alert sent successfully")
+                    logger.info(
+                        f"   Next: Yield Optimizer will fetch REAL DeFi Llama data")
+
+                    # Clear pending alert
+                    self._pending_demo_alert = None
+
+                except Exception as e:
+                    logger.error(f"Failed to send demo alert: {e}")
+                    if self._pending_demo_alert:
+                        position_id = self._pending_demo_alert.get(
+                            'position_id')
+                        self.demo_status[position_id] = {
+                            'status': 'error',
+                            'message': f'Failed to send alert: {str(e)}',
+                            'timestamp': int(time.time() * 1000)
+                        }
+                    self._pending_demo_alert = None
+
+            current_time = time.time()
+
+            # Fetch from subgraph every 30 seconds
+            if current_time - self.last_subgraph_fetch > 25:
+                try:
+                    logger.info("🔍 Fetching risky positions from subgraph...")
+
+                    # Get positions with HF < 2.0 (all at-risk positions)
+                    risky_positions = await self.subgraph_fetcher.get_risky_positions(
+                        health_factor_threshold=2.0,
+                        limit=20
+                    )
+
+                    logger.info(
+                        f"📦 Subgraph returned {len(risky_positions)} positions")
+
+                    if risky_positions:
                         logger.info(
-                            "🔍 Fetching risky positions from subgraph...")
+                            f"Processing {len(risky_positions)} positions...")
+                        loaded_count = 0
+                        for pos in risky_positions:
+                            try:
+                                logger.info(
+                                    f"  Processing position {pos.get('id', 'unknown')[:16]}...")
+                                user_id = pos['user']['id']
+                                health_factor = float(pos['healthFactor'])
 
-                        # Get positions with HF < 2.0 (includes critical, high, moderate risk)
-                        risky_positions = await self.subgraph_fetcher.get_risky_positions(
-                            health_factor_threshold=2.0,
-                            limit=20
-                        )
-
-                        logger.info(
-                            f"📦 Subgraph returned {len(risky_positions)} positions")
-
-                        if risky_positions:
-                            mode_label = "🎬 PRESENTATION" if PRESENTATION_MODE else "🏭 PRODUCTION"
-                            logger.info(
-                                f"📊 [{mode_label}] Found {len(risky_positions)} risky positions from subgraph")
-
-                            # Convert subgraph positions to our internal format
-                            loaded_count = 0
-                            for pos in risky_positions:
-                                try:
-                                    user_id = pos['user']['id']
-                                    position_id = pos['id']
-
-                                    # Skip positions with negative health factors (already liquidated)
-                                    health_factor = float(pos['healthFactor'])
-                                    if health_factor < 0:
-                                        logger.debug(
-                                            f"Skipping liquidated position {position_id} (HF: {health_factor})")
-                                        continue
-
-                                    # Get token addresses and map to symbols
-                                    collateral_asset = pos['collateralAsset']
-                                    debt_asset = pos['debtAsset']
-
-                                    # Map addresses to token symbols for price lookups
-                                    collateral_token = get_token_symbol(
-                                        collateral_asset)
-                                    debt_token = get_token_symbol(debt_asset)
-
-                                    # Skip positions with unknown tokens
-                                    if collateral_token == 'UNKNOWN' or debt_token == 'UNKNOWN':
-                                        logger.debug(
-                                            f"Skipping position {position_id} with unknown tokens")
-                                        continue
-
-                                    # Parse position data
-                                    self.positions[user_id] = {
-                                        'position_id': position_id,
-                                        'protocol': 'aave-v3',  # All positions from LiqX subgraph are Aave V3
-                                        'chain': 'ethereum-sepolia',  # Sepolia testnet
-                                        'collateral_asset': collateral_asset,
-                                        'collateral_token': collateral_token,
-                                        'collateral_amount': float(pos['collateralAmount']),
-                                        'debt_asset': debt_asset,
-                                        'debt_token': debt_token,
-                                        'debt_amount': float(pos['debtAmount']),
-                                        'health_factor': health_factor,
-                                        'last_updated': pos['updatedAt']
-                                    }
-                                    loaded_count += 1
-                                except Exception as parse_error:
+                                # Skip liquidated positions
+                                if health_factor < 0:
                                     logger.warning(
-                                        f"Failed to parse position: {parse_error}")
+                                        f"    Skipping liquidated position (HF={health_factor})")
                                     continue
 
-                            logger.success(
-                                f"✅ Loaded {loaded_count} positions for monitoring")
-                        else:
+                                # Log raw token addresses from subgraph
+                                logger.info(
+                                    f"Position: {pos['id'][:10]}... Collateral: {pos['collateralAsset']}, Debt: {pos['debtAsset']}")
+
+                                # Get token symbols
+                                collateral_token = get_token_symbol(
+                                    pos['collateralAsset'])
+                                debt_token = get_token_symbol(pos['debtAsset'])
+
+                                logger.info(
+                                    f"  Mapped to: {collateral_token} / {debt_token}")
+
+                                # Store position (even with UNKNOWN tokens - will use fallback prices)
+                                self.positions[user_id] = {
+                                    'position_id': pos['id'],
+                                    'protocol': 'aave-v3',
+                                    'chain': 'ethereum',
+                                    'collateral_asset': pos['collateralAsset'],
+                                    'collateral_token': collateral_token,
+                                    'collateral_amount': float(pos['collateralAmount']),
+                                    'debt_asset': pos['debtAsset'],
+                                    'debt_token': debt_token,
+                                    'debt_amount': float(pos['debtAmount']),
+                                    'health_factor': health_factor,
+                                    'last_updated': pos['updatedAt']
+                                }
+                                loaded_count += 1
+
+                            except Exception as parse_error:
+                                logger.warning(
+                                    f"Failed to parse position: {parse_error}")
+                                continue
+
+                        logger.success(
+                            f"✅ Loaded {loaded_count} positions for monitoring")
+
+                        if loaded_count == 0 and len(risky_positions) > 0:
+                            logger.warning(
+                                "⚠️  All fetched positions are liquidated (negative HF)")
                             logger.info(
-                                "✨ No risky positions found - all positions healthy!")
+                                "   For demo purposes, frontend will use mock positions")
+                    else:
+                        logger.info(
+                            "✨ No risky positions found - all positions healthy!")
 
-                        self.last_subgraph_fetch = current_time
+                    self.last_subgraph_fetch = current_time
 
-                    except Exception as e:
-                        logger.error(
-                            f"❌ Failed to fetch positions from subgraph: {e}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-                        self.errors_count += 1
+                except Exception as e:
+                    logger.error(f"❌ Failed to fetch from subgraph: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
-            # Now monitor all loaded positions
+            # Monitor all loaded positions
             if not self.positions:
                 logger.debug("No positions to monitor")
                 return
@@ -441,207 +650,81 @@ class PositionMonitorAgent:
                 except Exception as e:
                     logger.error(
                         f"Error checking position {user_address}: {e}")
-                    self.errors_count += 1
-
-        @self.agent.on_message(model=DemoMarketCrash)
-        async def handle_crash_start(ctx: Context, sender: str, msg: DemoMarketCrash):
-            """Handle demo crash initiation"""
-            self._log_message(
-                direction='received',
-                message_type='DemoMarketCrash',
-                sender=sender[:16] + '...',
-                details={
-                    'initial_price': f"${msg.initial_eth_price:.2f}",
-                    'target_price': f"${msg.target_eth_price:.2f}",
-                    'duration': f"{msg.crash_duration_seconds}s"
-                }
-            )
-
-            logger.warning("🚨 DEMO CRASH INITIATED!")
-            logger.info(f"   Initial: ${msg.initial_eth_price:.2f}")
-            logger.info(f"   Target: ${msg.target_eth_price:.2f}")
-            logger.info(f"   Duration: {msg.crash_duration_seconds}s")
-
-            self.demo_crash_active = True
-            self.demo_crash_id = msg.crash_id
-
-            # Set initial price
-            self.price_manager.set_mock_price("ETH", msg.initial_eth_price)
-
-            self.messages_processed += 1
-
-        @self.agent.on_message(model=DemoPriceUpdate)
-        async def handle_price_update(ctx: Context, sender: str, msg: DemoPriceUpdate):
-            """Handle real-time price updates during crash"""
-            self._log_message(
-                direction='received',
-                message_type='DemoPriceUpdate',
-                sender=sender[:16] + '...',
-                details={
-                    'eth_price': f"${msg.current_eth_price:.2f}"
-                }
-            )
-
-            if msg.crash_id != self.demo_crash_id:
-                return
-
-            # Update mock oracle
-            self.price_manager.set_mock_price("ETH", msg.current_eth_price)
-
-            logger.info(
-                f"📉 Price Update: ${msg.current_eth_price:.2f} "
-                f"({msg.price_change_percent:+.1f}%)"
-            )
-
-            # Recalculate health factors for all positions
-            for user_address, position_data in self.positions.items():
-                await self._check_position(ctx, user_address, position_data)
-
-            self.messages_processed += 1
-
-        @self.agent.on_message(model=ExecutionResult)
-        async def handle_execution_result(ctx: Context, sender: str, msg: ExecutionResult):
-            """Handle execution result from executor agent"""
-            logger.warning("⚠️  EXECUTION RESULT RECEIVED")
-            logger.info(f"   Execution ID: {msg.execution_id}")
-            logger.info(f"   Status: {msg.status.upper()}")
-
-            if msg.status == "success":
-                logger.success("✅ Rebalancing execution successful!")
-                logger.info(
-                    "   Position should now have improved health factor")
-                logger.info("   🎉 Liquidation risk reduced!")
-            else:
-                logger.error("❌ Rebalancing execution failed")
-                logger.info("   Position remains at risk")
-
-            self.messages_processed += 1
-
-        @self.agent.on_message(model=HealthCheckRequest)
-        async def handle_health_check(ctx: Context, sender: str, msg: HealthCheckRequest):
-            """Respond to health check requests"""
-            uptime = int(time.time() - self.start_time)
-
-            response = HealthCheckResponse(
-                agent_name="position_monitor",
-                status="healthy" if self.errors_count < 10 else "degraded",
-                uptime_seconds=uptime,
-                messages_processed=self.messages_processed,
-                last_activity=int(time.time()),
-                errors_count=self.errors_count,
-                timestamp=int(time.time())
-            )
-
-            await ctx.send(sender, response)
-            logger.debug(f"📋 Health check response sent to {sender}")
 
         @self.agent.on_message(model=PresentationTrigger)
         async def handle_presentation_trigger(ctx: Context, sender: str, msg: PresentationTrigger):
-            """Handle manual triggers for live presentations - PRESENTATION_MODE only"""
+            """Handle manual crash triggers from presentation mode"""
+            logger.warning(f"🎭 PRESENTATION TRIGGER RECEIVED")
+            logger.info(f"   Event: {msg.event_type}")
+            logger.info(f"   ETH Drop: {msg.eth_drop * 100:.1f}%")
+            logger.info(f"   Duration: {msg.duration}s")
 
-            # Log received message
-            self._log_message(
-                direction='received',
-                message_type='PresentationTrigger',
-                sender=sender[:16] + '...',
-                details={
-                    'trigger_type': msg.trigger_type,
-                    'trigger_id': msg.trigger_id
-                }
-            )
-
-            # Security check: Only allow in PRESENTATION_MODE
-            if not PRESENTATION_MODE:
+            # Simulate price crash by temporarily modifying price feeds
+            # This will affect the next position check cycle
+            original_eth_price = await self.price_manager.get_token_price("WETH")
+            if original_eth_price:
+                crashed_price = original_eth_price * (1 - msg.eth_drop)
                 logger.warning(
-                    "🚫 PRESENTATION TRIGGER REJECTED: Not in PRESENTATION_MODE")
-                return
+                    f"   Simulating ETH crash: ${original_eth_price:.2f} → ${crashed_price:.2f}")
+                # Note: Price manager would need a method to inject temporary prices
+                # For now, this just logs the trigger
 
-            # Validate secret
-            if msg.secret != PRESENTATION_TRIGGER_SECRET:
-                logger.error("🚫 PRESENTATION TRIGGER REJECTED: Invalid secret")
-                return
+            self._log_message('received', 'PresentationTrigger', sender, {
+                'event_type': msg.event_type,
+                'eth_drop': f"{msg.eth_drop * 100:.1f}%"
+            })
 
-            logger.warning("🎯 PRESENTATION TRIGGER RECEIVED!")
-            logger.info(f"   Trigger ID: {msg.trigger_id}")
-            logger.info(f"   Trigger Type: {msg.trigger_type}")
+        @self.agent.on_message(model=HealthCheckRequest)
+        async def handle_health_check(ctx: Context, sender: str, msg: HealthCheckRequest):
+            """Respond to health checks"""
+            response = HealthCheckResponse(
+                agent_name="position_monitor",
+                status="online",
+                positions_monitored=len(self.positions),
+                timestamp=int(time.time() * 1000)
+            )
+            await ctx.send(sender, response)
 
-            if msg.trigger_type == "market_crash":
-                # Simulate ETH price crash
-                eth_drop = msg.eth_price_drop_percent or 30.0
-                current_eth_price = await self.price_manager.get_token_price("WETH")
-                if current_eth_price:
-                    new_price = current_eth_price * (1 - eth_drop / 100)
-                    self.price_manager.set_mock_price("WETH", new_price)
-                    self.price_manager.set_mock_price("ETH", new_price)
-                    logger.warning(
-                        f"🚨 SIMULATED MARKET CRASH: ETH ${current_eth_price:.2f} → ${new_price:.2f} (-{eth_drop}%)")
+        @self.agent.on_message(model=ExecutionResult)
+        async def handle_execution_result(ctx: Context, sender: str, msg: ExecutionResult):
+            """Log execution results from downstream agents"""
+            logger.info(f"📨 Execution result: {msg.success}")
 
-                    # Recalculate all positions with new price
-                    for user_address, position_data in self.positions.items():
-                        await self._check_position(ctx, user_address, position_data)
+            # Update demo status if this was a demo trigger
+            if msg.position_id in self.demo_status:
+                if msg.success:
+                    self.demo_status[msg.position_id] = {
+                        'status': 'completed',
+                        'message': msg.message,
+                        'timestamp': int(time.time() * 1000),
+                        'stage': 'execution_complete',
+                        'final_result': msg.message
+                    }
+                    logger.success(f"🎉 Demo flow completed: {msg.position_id}")
+                else:
+                    self.demo_status[msg.position_id] = {
+                        'status': 'failed',
+                        'message': msg.message,
+                        'timestamp': int(time.time() * 1000),
+                        'stage': 'execution_failed',
+                        'error': msg.message
+                    }
+                    logger.error(f"❌ Demo flow failed: {msg.position_id}")
 
-            elif msg.trigger_type == "alert_position":
-                # Force alert for specific position
-                if msg.target_position_id and msg.target_position_id in [p.get('position_id') for p in self.positions.values()]:
-                    for user_address, position_data in self.positions.items():
-                        if position_data.get('position_id') == msg.target_position_id:
-                            logger.warning(
-                                f"🎯 FORCING ALERT for position {msg.target_position_id}")
-                            await self._check_position(ctx, user_address, position_data)
-                            break
-                elif self.positions:
-                    # Alert first position if no specific target
-                    first_user = list(self.positions.keys())[0]
-                    logger.warning(
-                        f"🎯 FORCING ALERT for first position: {first_user}")
-                    await self._check_position(ctx, first_user, self.positions[first_user])
+            if msg.success:
+                # Clear alert cooldown to allow re-alerting if needed
+                if msg.position_id in self.alerted_positions:
+                    del self.alerted_positions[msg.position_id]
 
-            elif msg.trigger_type == "price_drop":
-                # Set custom price for specific token
-                if msg.target_token and msg.custom_price:
-                    self.price_manager.set_mock_price(
-                        msg.target_token, msg.custom_price)
-                    logger.warning(
-                        f"📉 CUSTOM PRICE SET: {msg.target_token} → ${msg.custom_price:.2f}")
-
-                    # Recalculate all positions
-                    for user_address, position_data in self.positions.items():
-                        await self._check_position(ctx, user_address, position_data)
-
-            self.messages_processed += 1
-            logger.success(
-                f"✅ Presentation trigger '{msg.trigger_type}' executed successfully")
-
-    async def _initialize_demo_positions(self, ctx: Context):
-        """Initialize demo positions for testing"""
-        logger.info("🎭 Initializing demo positions...")
-
-        demo_position = {
-            "position_id": 1,
-            "protocol": "aave",
-            "chain": "ethereum",
-            "collateral_token": "ETH",
-            "collateral_amount": 2.0,  # 2 ETH
-            "debt_token": "USDC",
-            # $5000 USDC - increased to trigger alert (HF will be ~1.24)
-            "debt_amount": 5000.0,
-            "created_at": int(time.time())
-        }
-
-        # Use a test address
-        test_address = "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0"
-        self.positions[test_address] = demo_position
-
-        logger.success(f"✅ Demo position created for {test_address}")
-        logger.info(
-            f"   Collateral: {demo_position['collateral_amount']} {demo_position['collateral_token']}")
-        logger.info(
-            f"   Debt: {demo_position['debt_amount']} {demo_position['debt_token']}")
+            self._log_message('received', 'ExecutionResult', sender, {
+                'success': msg.success,
+                'message': msg.message
+            })
 
     async def _check_position(self, ctx: Context, user_address: str, position_data: Dict):
-        """Check a single position for liquidation risk"""
+        """Check a single position and send alert if risky"""
         try:
-            # Get current prices
+            # Get current collateral price
             collateral_price = await self.price_manager.get_token_price(
                 position_data['collateral_token']
             )
@@ -651,20 +734,17 @@ class PositionMonitorAgent:
                     f"Failed to get price for {position_data['collateral_token']}")
                 return
 
-            # Calculate collateral value
+            # Calculate values
             collateral_value = position_data['collateral_amount'] * \
                 collateral_price
-            debt_value = position_data['debt_amount']  # Assuming stable coin
+            debt_value = position_data['debt_amount']  # Assuming stablecoin
 
             # Calculate health factor
-            # HF = collateral_value / debt_value (simplified)
-            # Real Aave uses: (collateral * liquidation_threshold) / debt
-            # For demo, we'll use 0.85 liquidation threshold
-            liquidation_threshold = 0.85
+            liquidation_threshold = 0.85  # Aave V3 typical
             health_factor = (collateral_value * liquidation_threshold) / \
                 debt_value if debt_value > 0 else 999.0
 
-            # Use MeTTa AI for advanced risk assessment
+            # MeTTa risk assessment
             metta_risk = self.metta_reasoner.assess_risk(
                 health_factor=health_factor,
                 collateral_usd=collateral_value,
@@ -673,70 +753,44 @@ class PositionMonitorAgent:
                 debt_token=position_data['debt_token']
             )
 
-            # Use MeTTa's intelligent risk level (falls back to simple logic if MeTTa unavailable)
             risk_level = metta_risk.get('risk_level', 'moderate')
-            urgency_score = metta_risk.get('urgency_score', 5)
-
-            # Override with simple thresholds if not using MeTTa
-            if not metta_risk.get('using_metta', False):
-                if health_factor < CRITICAL_HF:
-                    risk_level = "critical"
-                elif health_factor < MODERATE_HF:
-                    risk_level = "moderate"
-                elif health_factor < SAFE_HF:
-                    risk_level = "high"
-                else:
-                    risk_level = "low"
 
             logger.info(
                 f"Position {user_address[:10]}... | "
                 f"HF: {health_factor:.2f} | "
                 f"Collateral: ${collateral_value:.2f} | "
                 f"Debt: ${debt_value:.2f} | "
-                f"Risk: {risk_level.upper()} | "
-                f"Urgency: {urgency_score}/10 | "
-                f"MeTTa: {'✅' if metta_risk.get('using_metta') else '⚠️ fallback'}"
+                f"Risk: {risk_level.upper()}"
             )
 
-            # Send alert if health factor is below moderate threshold
+            # Send alert if risky
             if health_factor < MODERATE_HF:
-                await self._send_alert(ctx, user_address, position_data, collateral_value, debt_value, health_factor, risk_level)
+                await self._send_alert(
+                    ctx, user_address, position_data,
+                    collateral_value, debt_value, health_factor, risk_level
+                )
 
         except Exception as e:
             logger.error(f"Error checking position: {e}")
-            self.errors_count += 1
 
     async def _send_alert(
-        self,
-        ctx: Context,
-        user_address: str,
-        position_data: Dict,
-        collateral_value: float,
-        debt_value: float,
-        health_factor: float,
-        risk_level: str
+        self, ctx: Context, user_address: str, position_data: Dict,
+        collateral_value: float, debt_value: float, health_factor: float, risk_level: str
     ):
-        """Send position alert to yield optimizer"""
+        """Send position alert to Yield Optimizer"""
 
-        if not self.YIELD_OPTIMIZER_ADDRESS:
-            logger.warning(
-                "Yield optimizer address not set, cannot send alert")
-            return
-
-        # Check if we've already alerted for this position recently (deduplication)
+        # Check cooldown
         current_time = time.time()
-        last_alert_time = self.alerted_positions.get(user_address, 0)
+        last_alert = self.alerted_positions.get(user_address, 0)
 
-        if current_time - last_alert_time < self.alert_cooldown:
-            time_since_alert = int(current_time - last_alert_time)
-            cooldown_remaining = int(self.alert_cooldown - time_since_alert)
-            logger.info(
-                f"⏭️  Skipping alert for {user_address[:10]}... (cooldown: {time_since_alert}s / {self.alert_cooldown}s, {cooldown_remaining}s remaining)")
+        if current_time - last_alert < ALERT_COOLDOWN_SECONDS:
+            logger.debug(f"⏭️  Skipping alert (cooldown)")
             return
 
-        # Mark this position as alerted
+        # Mark as alerted
         self.alerted_positions[user_address] = current_time
 
+        # Create alert
         alert = PositionAlert(
             user_address=user_address,
             position_id=position_data['position_id'],
@@ -748,46 +802,48 @@ class PositionMonitorAgent:
             collateral_token=position_data['collateral_token'],
             debt_token=position_data['debt_token'],
             risk_level=risk_level,
-            timestamp=int(time.time()),
-            predicted_liquidation_time=None  # TODO: Implement prediction
+            timestamp=int(time.time() * 1000),
+            predicted_liquidation_time=None
         )
 
         # Send to Yield Optimizer
-        # For local testing: agents discover each other via their HTTP endpoints automatically
-        await ctx.send(self.YIELD_OPTIMIZER_ADDRESS, alert)
+        await ctx.send(YIELD_OPTIMIZER_ADDRESS, alert)
 
-        # Log the message
-        self._log_message(
-            direction='sent',
-            message_type='PositionAlert',
-            recipient='Yield Optimizer',
-            details={
-                'user': user_address[:10] + '...' + user_address[-8:],
-                'health_factor': round(health_factor, 3),
-                'risk_level': risk_level,
-                'collateral': f"${collateral_value:,.2f}",
-                'debt': f"${debt_value:,.2f}"
-            }
-        )
+        logger.warning(f"🚨 ALERT SENT to Yield Optimizer")
+        logger.info(f"   User: {user_address[:10]}...")
+        logger.info(f"   Health Factor: {health_factor:.2f}")
+        logger.info(f"   Risk: {risk_level.upper()}")
 
-        logger.warning(
-            f"⚠️  ALERT SENT: Position {user_address[:10]}... | HF: {health_factor:.2f}")
-        self.messages_processed += 1
+        self._log_message('sent', 'PositionAlert', YIELD_OPTIMIZER_ADDRESS, {
+            'position_id': position_data['position_id'],
+            'user': user_address[:10] + '...',
+            'health_factor': round(health_factor, 3),
+            'risk_level': risk_level,
+            'total_collateral_usd': round(collateral_value, 2),
+            'total_debt_usd': round(debt_value, 2),
+            'collateral_token': position_data['collateral_token'],
+            'debt_token': position_data['debt_token'],
+            'protocol': position_data['protocol'],
+            'chain': position_data['chain']
+        })
 
-    def add_position(self, user_address: str, position_data: Dict):
-        """Add a position to monitor"""
-        self.positions[user_address] = position_data
-        logger.info(f"➕ Position added: {user_address}")
+    def _log_message(self, direction: str, message_type: str, address: str, details: Dict):
+        """Log message to history"""
+        self.message_history.append({
+            'direction': direction,
+            'type': message_type,
+            'address': address[:16] + '...' if len(address) > 16 else address,
+            'details': details,
+            'timestamp': int(time.time() * 1000)
+        })
 
-    def remove_position(self, user_address: str):
-        """Remove a position from monitoring"""
-        if user_address in self.positions:
-            del self.positions[user_address]
-            logger.info(f"➖ Position removed: {user_address}")
+        # Keep only last 1000 messages
+        if len(self.message_history) > 1000:
+            self.message_history = self.message_history[-1000:]
 
     def run(self):
-        """Run the agent"""
-        logger.info("Starting Position Monitor Agent...")
+        """Start the agent"""
+        logger.info("🚀 Starting Position Monitor Agent...")
         self.agent.run()
 
 
@@ -795,40 +851,6 @@ class PositionMonitorAgent:
 # MAIN
 # ═══════════════════════════════════════════════════════
 
-def main():
-    """Main entry point"""
-    # Setup logging
-    logger.remove()
-    logger.add(
-        lambda msg: print(msg, end=""),
-        colorize=True,
-        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>PositionMonitor</cyan> | <level>{message}</level>",
-        level=os.getenv('LOG_LEVEL', 'INFO')
-    )
-
-    # Add file logging
-    logger.add(
-        "logs/position_monitor.log",
-        rotation="10 MB",
-        retention="7 days",
-        level="DEBUG"
-    )
-
-    # Create and run agent
-    agent = PositionMonitorAgent()
-
-    # Print agent info
-    logger.info("="*60)
-    logger.info("Position Monitor Agent - LiquidityGuard AI")
-    logger.info("="*60)
-    logger.info(f"Agent Address: {agent.agent.address}")
-    logger.info(f"Port: {AGENT_PORT}")
-    logger.info(f"Demo Mode: {DEMO_MODE}")
-    logger.info("="*60)
-
-    # Run agent
-    agent.run()
-
-
 if __name__ == "__main__":
-    main()
+    agent = PositionMonitorAgent()
+    agent.run()

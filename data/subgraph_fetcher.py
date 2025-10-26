@@ -1,6 +1,6 @@
 """
 LiqX Subgraph Data Fetcher
-Queries The Graph for Aave V3 position data on Sepolia testnet
+Queries The Graph for Aave V3 position data on Ethereum Mainnet
 """
 
 import os
@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 SUBGRAPH_URL = os.getenv(
-    "LIQX_SUBGRAPH_URL", "https://api.studio.thegraph.com/query/1704206/liq-x/v0.1.0")
+    "LIQX_SUBGRAPH_URL", "https://api.studio.thegraph.com/query/1704206/liq-x/version/latest")
 
 
 class SubgraphFetcher:

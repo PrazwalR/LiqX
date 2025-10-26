@@ -47,7 +47,7 @@ async function checkAgentStatus(endpoint: string, agentId: string, name: string)
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout
 
-    const response = await fetch(`${endpoint}/health`, {
+    const response = await fetch(`${endpoint}/status`, {
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
@@ -62,7 +62,7 @@ async function checkAgentStatus(endpoint: string, agentId: string, name: string)
       return {
         agentId,
         name,
-        status: data.status === 'ok' ? 'online' : 'offline',
+        status: data.status === 'online' ? 'online' : 'offline',
         lastSeen: Date.now(),
         endpoint,
       };

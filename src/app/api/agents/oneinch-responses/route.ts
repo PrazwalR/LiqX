@@ -8,7 +8,7 @@ import { NextResponse } from 'next/server';
 export async function GET(request: Request) {
   try {
     // Swap Optimizer agent HTTP API endpoint
-    const agentHttpUrl = process.env.SWAP_OPTIMIZER_HTTP_URL || 'http://localhost:8102';
+    const agentHttpUrl = process.env.SWAP_OPTIMIZER_HTTP_URL || 'http://localhost:8103';
 
     const response = await fetch(`${agentHttpUrl}/oneinch-responses`, {
       headers: {

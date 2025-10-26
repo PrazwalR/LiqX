@@ -54,19 +54,19 @@ export const API_CONFIG = {
 
   // The Graph API
   theGraph: {
-    // Using Aave V3 Ethereum Mainnet subgraph (more stable than Sepolia)
-    // Note: Sepolia endpoint has been deprecated by The Graph
-    subgraphUrl: 'https://api.studio.thegraph.com/query/52869/aave-v3-ethereum/version/latest',
-    fallbackUrl: 'https://api.thegraph.com/subgraphs/name/aave/protocol-v3',
+    // Using your custom LiqX subgraph on Ethereum Mainnet (always uses latest version)
+    // Falls back to mock data if unavailable (expected for hackathon demo)
+    subgraphUrl: process.env.NEXT_PUBLIC_LIQX_SUBGRAPH_URL || 'https://api.studio.thegraph.com/query/1704206/liq-x/version/latest',
+    fallbackUrl: 'https://api.studio.thegraph.com/query/52869/aave-v3-ethereum/version/latest',
     updateInterval: 10000, // 10 seconds
   },
 
   // Python Agents
   agents: {
     positionMonitor: 'http://localhost:8101',
-    yieldOptimizer: 'http://localhost:8111',
-    swapOptimizer: 'http://localhost:8102',
-    crossChainExecutor: 'http://localhost:8121',
+    yieldOptimizer: 'http://localhost:8102',
+    swapOptimizer: 'http://localhost:8103',
+    crossChainExecutor: 'http://localhost:8122',
     presentationTrigger: 'http://localhost:8005',
     statusInterval: 5000, // 5 seconds
   },

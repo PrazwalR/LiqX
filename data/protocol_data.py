@@ -115,12 +115,21 @@ class ProtocolDataFetcher:
                         best_match = None
                         best_apy = 0
 
+                        # Maximum realistic APY threshold (filter anomalies like 352,603%)
+                        MAX_REALISTIC_APY = 100.0  # 100% APY is already very high
+
                         # Flexible matching
                         for pool in pools:
                             pool_project = pool.get('project', '').lower()
                             pool_chain = pool.get('chain', '').lower()
                             pool_symbol = pool.get('symbol', '').upper()
                             apy = pool.get('apy', 0)
+
+                            # Skip unrealistic APY values (likely data errors)
+                            if apy > MAX_REALISTIC_APY:
+                                logger.debug(
+                                    f"Skipping unrealistic APY: {pool_project} {pool_symbol} - {apy:.2f}% (max: {MAX_REALISTIC_APY}%)")
+                                continue
 
                             # Protocol matching: exact, startswith, or contains
                             protocol_match = (
@@ -155,51 +164,215 @@ class ProtocolDataFetcher:
 
         return None
 
-    async def get_all_yields(self) -> Dict[str, float]:
+    async def get_all_yields(self, token: Optional[str] = None, min_apy: float = 0.0, limit: Optional[int] = None) -> List[Dict]:
         """
-        Get yields from all protocols
+        Get yields from ALL protocols by fetching complete DeFi Llama pools data
+
+        Instead of hardcoded list, fetches entire dataset and filters for lending protocols
+
+        Args:
+            token: Optional token filter (USDC, ETH, etc.)
+            min_apy: Minimum APY threshold
+            limit: Maximum number of yields to return (default: all, use 10 for efficiency)
 
         Returns:
-            {
-                "aave_ethereum_usdc": 5.2,
-                "compound_ethereum_usdc": 4.8,
-                "kamino_solana_sol": 9.1
-            }
+            List of yield dictionaries sorted by APY (highest first):
+            [
+                {
+                    "protocol": "kamino",
+                    "chain": "solana",
+                    "token": "SOL",
+                    "apy": 88.85,
+                    "pool": "kaminoliquidity_solana_sol",
+                    "tvlUsd": 5000000,
+                    "estimated_gas": 0.1
+                },
+                ...
+            ]
         """
-        protocols = [
-            ("aave", "ethereum", "ETH"),
-            ("aave", "ethereum", "USDC"),
-            ("compound", "ethereum", "USDC"),
-            ("compound", "ethereum", "ETH"),
-            ("lido", "ethereum", "ETH"),
-            ("kamino", "solana", "SOL"),
-            ("drift", "solana", "USDC"),
-        ]
+        url = f"{self.defillama_base_url}/pools"
 
-        results = {}
-        tasks = []
-        keys = []
+        try:
+            # Create SSL context
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
 
-        for protocol, chain, token in protocols:
-            key = f"{protocol}_{chain}_{token}".lower()
-            keys.append(key)
-            tasks.append(self.get_protocol_apy(protocol, chain, token))
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url, timeout=20) as response:
+                    if response.status != 200:
+                        logger.error(
+                            f"DeFi Llama API error: {response.status}")
+                        return []
 
-        apys = await asyncio.gather(*tasks, return_exceptions=True)
+                    data = await response.json()
+                    pools = data.get('data', [])
 
-        for key, apy in zip(keys, apys):
-            if isinstance(apy, Exception):
-                logger.error(f"Error fetching {key}: {apy}")
-            elif apy:
-                results[key] = apy
+                    logger.info(
+                        f"📡 Fetched {len(pools)} pools from DeFi Llama")
 
-        return results
+                    # Filter for lending protocols only
+                    lending_protocols = {
+                        'aave', 'aave-v2', 'aave-v3',
+                        'compound', 'compound-v2', 'compound-v3',
+                        'spark', 'morpho',
+                        'kamino', 'solend', 'marginfi', 'drift',
+                        'venus', 'benqi', 'radiant',
+                        'lido', 'rocket-pool', 'frax'
+                    }
+
+                    # Supported chains
+                    supported_chains = {
+                        'ethereum', 'arbitrum', 'optimism', 'base', 'polygon',
+                        'solana', 'avalanche'
+                    }
+
+                    # Common tokens we care about
+                    supported_tokens = {
+                        'ETH', 'WETH', 'STETH', 'RETH',
+                        'USDC', 'USDT', 'DAI', 'USDE',
+                        'WBTC', 'BTC',
+                        'SOL', 'MSOL', 'JSOL'
+                    }
+
+                    results = []
+                    max_realistic_apy = 100.0  # Filter anomalies
+
+                    for pool in pools:
+                        project = pool.get(
+                            'project', '').lower().replace('-', '')
+                        chain = pool.get('chain', '').lower()
+                        symbol = pool.get('symbol', '').upper()
+                        apy = pool.get('apy', 0)
+                        tvl = pool.get('tvlUsd', 0)
+
+                        # Skip if not a lending protocol
+                        if not any(lp in project for lp in lending_protocols):
+                            continue
+
+                        # Skip if chain not supported
+                        if chain not in supported_chains:
+                            continue
+
+                        # Skip unrealistic APYs
+                        if apy > max_realistic_apy or apy < min_apy:
+                            continue
+
+                        # Skip low TVL pools (< $100k - likely unreliable)
+                        if tvl < 100000:
+                            continue
+
+                        # Extract token from symbol (e.g., "aUSDC" -> "USDC", "WETH-USDC" -> "WETH")
+                        found_token = None
+                        for supported_token in supported_tokens:
+                            if supported_token in symbol:
+                                found_token = supported_token
+                                break
+
+                        if not found_token:
+                            continue
+
+                        # Token filter
+                        if token and found_token.upper() != token.upper():
+                            continue
+
+                        # Normalize project name (remove version suffixes, liquidity, finance, etc.)
+                        project_normalized = (project
+                                              .replace('v3', '').replace('v2', '').replace('v1', '')
+                                              .replace('liquidity', '').replace('finance', '')
+                                              .replace('-', '').replace('_', '')
+                                              .strip()
+                                              )
+
+                        # Estimate gas costs based on chain
+                        gas_costs = {
+                            'ethereum': 50.0,
+                            'arbitrum': 5.0,
+                            'optimism': 5.0,
+                            'base': 5.0,
+                            'polygon': 2.0,
+                            'solana': 0.1,
+                            'avalanche': 3.0
+                        }
+
+                        results.append({
+                            'protocol': project_normalized,
+                            'chain': chain,
+                            'token': found_token,
+                            'apy': apy,
+                            'pool': f"{project_normalized}_{chain}_{found_token}".lower(),
+                            'tvlUsd': tvl,
+                            'estimated_gas': gas_costs.get(chain, 10.0)
+                        })
+
+                    # Sort by APY (highest first)
+                    results.sort(key=lambda x: x['apy'], reverse=True)
+
+                    # Apply limit with protocol diversity
+                    if limit:
+                        # Get diverse protocols instead of all same protocol
+                        diverse_results = []
+                        protocol_count = {}
+                        max_per_protocol = 3  # Maximum 3 pools per protocol
+
+                        logger.debug(
+                            f"Applying diversity filter: limit={limit}, max_per_protocol={max_per_protocol}")
+
+                        for pool in results:
+                            protocol = pool['protocol']
+                            count = protocol_count.get(protocol, 0)
+
+                            # Add if we haven't hit the per-protocol limit
+                            if count < max_per_protocol:
+                                diverse_results.append(pool)
+                                protocol_count[protocol] = count + 1
+                                logger.debug(
+                                    f"  Added {protocol} (count: {protocol_count[protocol]}): {pool['apy']:.2f}%")
+
+                                # Stop when we reach desired total
+                                if len(diverse_results) >= limit:
+                                    logger.debug(
+                                        f"  Reached limit of {limit} results")
+                                    break
+                            else:
+                                logger.debug(
+                                    f"  Skipped {protocol} (already have {count}): {pool['apy']:.2f}%")
+
+                        results = diverse_results
+                        protocols_found = len(
+                            set(p['protocol'] for p in results))
+                        logger.success(
+                            f"✅ Loaded top {len(results)} lending yields from {protocols_found} protocols (max {max_per_protocol} per protocol)")
+                    else:
+                        logger.success(
+                            f"✅ Loaded {len(results)} lending yields")
+
+                    # Log top 10 yields
+                    if results:
+                        logger.info("📊 Top 10 yields:")
+                        for i, yield_data in enumerate(results[:10], 1):
+                            logger.info(
+                                f"   {i}. {yield_data['pool']}: {yield_data['apy']:.2f}%")
+
+                    return results
+
+        except asyncio.TimeoutError:
+            logger.error("DeFi Llama API timeout")
+        except Exception as e:
+            logger.error(f"Failed to fetch all yields: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+        return []
 
     async def find_best_yield(
         self,
         token: str,
         exclude_protocols: List[str] = None,
-        allow_cross_chain: bool = True
+        allow_cross_chain: bool = True,
+        min_apy: float = 0.0,
+        exclude_chains: List[str] = None
     ) -> Optional[Dict]:
         """
         Find the protocol with the best yield for a token
@@ -208,66 +381,111 @@ class ProtocolDataFetcher:
             token: Token symbol (WETH, ETH, USDC, etc.)
             exclude_protocols: List of protocols to exclude
             allow_cross_chain: Whether to include cross-chain opportunities
+            min_apy: Minimum APY threshold (for filtering)
+            exclude_chains: List of chains to exclude (e.g., ['solana'])
 
         Returns:
             {
-                "protocol": "aave",
-                "chain": "ethereum",
-                "token": "ETH",
-                "apy": 6.52
+                "protocol": "kamino",
+                "chain": "solana",
+                "token": "SOL",
+                "apy": 88.85,
+                "pool": "kaminoliquidity_solana_sol",
+                "cross_chain": True,
+                "estimated_gas": 0.1
             }
         """
         exclude_protocols = exclude_protocols or []
+        exclude_chains = exclude_chains or []
 
         # Normalize exclude list (remove -v3, -v2 suffixes)
         exclude_normalized = [p.replace(
             '-v3', '').replace('-v2', '').replace('-', '').lower() for p in exclude_protocols]
 
-        all_yields = await self.get_all_yields()
+        # Normalize exclude chains
+        exclude_chains_normalized = [c.lower() for c in exclude_chains]
 
-        # Handle WETH/ETH equivalence
-        token_variations = [token.upper()]
-        if token.upper() in ['WETH', 'ETH']:
-            token_variations = ['WETH', 'ETH']
+        # Get all yields (already sorted by APY)
+        all_yields = await self.get_all_yields(token=token, min_apy=min_apy)
 
-        best_yield = None
-        best_apy = 0
-
-        for key, apy in all_yields.items():
-            parts = key.split('_')
-            if len(parts) >= 3:
-                protocol, chain, token_symbol = parts[0], parts[1], parts[2]
-
-                # Check if protocol is excluded (normalized comparison)
-                protocol_normalized = protocol.replace(
-                    '-v3', '').replace('-v2', '').replace('-', '').lower()
-                if protocol_normalized in exclude_normalized:
-                    continue
-
-                # Case-insensitive token comparison with variations
-                token_match = token_symbol.upper(
-                ) in [tv.upper() for tv in token_variations]
-
-                if token_match and apy > best_apy:
-                    best_apy = apy
-                    best_yield = {
-                        "protocol": protocol,
-                        "chain": chain,
-                        "token": token_symbol.upper(),
-                        "apy": apy,
-                        "cross_chain": False
-                    }
-
-        if best_yield:
-            logger.info(
-                f"Best yield for {token}: {best_yield['protocol']} "
-                f"({best_yield['chain']}) - {best_yield['apy']:.2f}% APY"
-            )
+        # Handle token filtering
+        if token:
+            # Handle WETH/ETH equivalence
+            token_variations = [token.upper()]
+            if token.upper() in ['WETH', 'ETH']:
+                token_variations = ['WETH', 'ETH', 'STETH', 'RETH']
         else:
-            logger.warning(
-                f"No yields found for {token} (tried: {token_variations})")
+            # No token filter - accept all tokens
+            token_variations = None
 
-        return best_yield
+        # Find best yield that meets criteria
+        for yield_data in all_yields:
+            protocol = yield_data['protocol']
+            chain = yield_data['chain']
+            token_symbol = yield_data['token']
+
+            # Check if chain is excluded
+            if chain.lower() in exclude_chains_normalized:
+                continue
+
+            # Check if protocol is excluded (normalized comparison)
+            protocol_normalized = protocol.replace('-', '').lower()
+            if protocol_normalized in exclude_normalized:
+                continue
+
+            # Check token match (with variations for ETH/WETH) - skip if no filter
+            if token_variations and token_symbol.upper() not in token_variations:
+                continue
+
+            # Found the best yield that meets all criteria
+            logger.debug(
+                f"Best yield: {yield_data['pool']} - {yield_data['apy']:.2f}%")
+            return {
+                **yield_data,
+                'cross_chain': True  # Assume cross-chain for simplicity
+            }
+
+        return None
+
+    def _estimate_migration_gas(
+        self,
+        from_chain: str,
+        to_chain: str,
+        cross_chain: bool
+    ) -> float:
+        """
+        Estimate gas costs for migration in USD
+
+        Returns gas cost estimate in USD
+        """
+        # Base gas estimates (USD)
+        gas_estimates = {
+            # Same chain (Ethereum → Ethereum)
+            'same_chain': 25.0,  # Withdraw + Swap + Supply
+
+            # EVM cross-chain (Ethereum → Arbitrum/Optimism)
+            'evm_cross_chain': 40.0,  # + Stargate bridge fee
+
+            # Ethereum → Solana
+            'eth_to_sol': 50.0,  # + Wormhole bridge fee
+
+            # Solana → Ethereum
+            'sol_to_eth': 55.0,  # Higher due to ETH gas
+        }
+
+        if not cross_chain:
+            return gas_estimates['same_chain']
+
+        # Cross-chain routing
+        if from_chain == 'ethereum' and to_chain in ['arbitrum', 'optimism', 'base']:
+            return gas_estimates['evm_cross_chain']
+        elif from_chain == 'ethereum' and to_chain == 'solana':
+            return gas_estimates['eth_to_sol']
+        elif from_chain == 'solana' and to_chain == 'ethereum':
+            return gas_estimates['sol_to_eth']
+        else:
+            # Unknown route - use conservative estimate
+            return gas_estimates['evm_cross_chain']
 
     def set_mock_apy(self, protocol: str, chain: str, token: str, apy: float):
         """Set mock APY for demo mode"""

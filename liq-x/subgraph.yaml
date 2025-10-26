@@ -6,11 +6,11 @@ schema:
 dataSources:
   - kind: ethereum
     name: AaveV3Pool
-    network: sepolia
+    network: mainnet
     source:
-      address: "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951"
+      address: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
       abi: Pool
-      startBlock: 4354000
+      startBlock: 16291127
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7

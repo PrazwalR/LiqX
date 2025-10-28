@@ -862,4 +862,4 @@ MIT License - see [LICENSE](LICENSE) file
 
 ---
 
-**Built for ETHGlobal Online 2025 Hackathon** 🇹🇭
+**Built for ETHGlobal Online 2025 Hackathon** 
